@@ -1,0 +1,204 @@
+Waiting to connect to bluetoothd...[0;94m[bluetooth][0m#            [0;94m[DG01][0m#                         hci0 new_settings: powered bondable ssp br/edr le secure-conn cis-central cis-peripheral 
+[0;94m[DG01][0m# connect 0A:93:79:0C:DD:20
+Attempting to connect to 0A:93:79:0C:DD:20
+[0;94m[DG01][0m#                    Agent registered
+[0;94m[DG01][0m#                    [[0;93mCHG[0m] Controller 88:D8:2E:42:0C:10 Pairable: yes
+[0;94m[DG01][0m#                    Connection successful
+[0;94m[DG01][0m# menu gatt
+[1;39mMenu gatt:[0m
+[1;39mAvailable commands:[0m
+[1;39m-------------------[0m
+[1;39mlist-attributes [dev/local]                       [0mList attributes
+[1;39mselect-attribute <attribute/UUID/local> [attribute/UUID] [0mSelect attribute
+[1;39mattribute-info [attribute/UUID]                   [0mSelect attribute
+[1;39mread [offset]                                     [0mRead attribute value
+[1;39mwrite <data=xx xx ...> [offset] [type]            [0mWrite attribute value
+[1;39macquire-write                                     [0mAcquire Write file descriptor
+[1;39mrelease-write                                     [0mRelease Write file descriptor
+[1;39macquire-notify                                    [0mAcquire Notify file descriptor
+[1;39mrelease-notify                                    [0mRelease Notify file descriptor
+[1;39mnotify <on/off>                                   [0mNotify attribute value
+[1;39mclone [dev/attribute/UUID]                        [0mClone a device or attribute
+[1;39mregister-application [UUID ...]                   [0mRegister profile to connect
+[1;39munregister-application                            [0mUnregister profile
+[1;39mregister-service <UUID> [handle]                  [0mRegister application service.
+[1;39munregister-service <UUID/object>                  [0mUnregister application service
+[1;39mregister-includes <UUID> [handle]                 [0mRegister as Included service in.
+[1;39munregister-includes <Service-UUID><Inc-UUID>      [0mUnregister Included service.
+[1;39mregister-characteristic <UUID> <Flags=read,write,notify...> [handle] [0mRegister application characteristic
+[1;39munregister-characteristic <UUID/object>           [0mUnregister application characteristic
+[1;39mregister-descriptor <UUID> <Flags=read,write...> [handle] [0mRegister application descriptor
+[1;39munregister-descriptor <UUID/object>               [0mUnregister application descriptor
+[1;39mback                                              [0mReturn to main menu
+[1;39mversion                                           [0mDisplay version
+[1;39mquit                                              [0mQuit program
+[1;39mexit                                              [0mQuit program
+[1;39mhelp                                              [0mDisplay help about this program
+[1;39mexport                                            [0mPrint environment variables
+[0;94m[DG01][0m# list-attributes
+Primary Service (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service003e
+	0000aa00-0000-1000-8000-00805f9b34fb
+	Unknown
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service003e/char0041
+	0000aa02-0000-1000-8000-00805f9b34fb
+	Unknown
+Descriptor (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service003e/char0041/desc0043
+	00002902-0000-1000-8000-00805f9b34fb
+	Client Characteristic Configuration
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service003e/char003f
+	0000aa01-0000-1000-8000-00805f9b34fb
+	Unknown
+Primary Service (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service0036
+	0000fee7-0000-1000-8000-00805f9b34fb
+	Tencent Holdings Limited.
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service0036/char003c
+	0000fec9-0000-1000-8000-00805f9b34fb
+	Apple, Inc.
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service0036/char0039
+	0000fec8-0000-1000-8000-00805f9b34fb
+	Apple, Inc.
+Descriptor (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service0036/char0039/desc003b
+	00002902-0000-1000-8000-00805f9b34fb
+	Client Characteristic Configuration
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service0036/char0037
+	0000fec7-0000-1000-8000-00805f9b34fb
+	Apple, Inc.
+Primary Service (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service002d
+	7e400001-b5a3-f393-e0a9-e50e24dcca9d
+	Vendor specific
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service002d/char0033
+	7e400004-b5a3-f393-e0a9-e50e24dcca9d
+	Vendor specific
+Descriptor (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service002d/char0033/desc0035
+	00002902-0000-1000-8000-00805f9b34fb
+	Client Characteristic Configuration
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service002d/char0030
+	7e400003-b5a3-f393-e0a9-e50e24dcca9d
+	Vendor specific
+Descriptor (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service002d/char0030/desc0032
+	00002902-0000-1000-8000-00805f9b34fb
+	Client Characteristic Configuration
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service002d/char002e
+	7e400002-b5a3-f393-e0a9-e50e24dcca9d
+	Vendor specific
+Primary Service (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service0028
+	00003802-0000-1000-8000-00805f9b34fb
+	Unknown
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service0028/char0029
+	00004a02-0000-1000-8000-00805f9b34fb
+	Unknown
+Descriptor (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service0028/char0029/desc002c
+	00002901-0000-1000-8000-00805f9b34fb
+	Characteristic User Description
+Descriptor (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service0028/char0029/desc002b
+	00002902-0000-1000-8000-00805f9b34fb
+	Client Characteristic Configuration
+Primary Service (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service0024
+	0000180f-0000-1000-8000-00805f9b34fb
+	Battery Service
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service0024/char0025
+	00002a19-0000-1000-8000-00805f9b34fb
+	Battery Level
+Descriptor (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service0024/char0025/desc0027
+	00002902-0000-1000-8000-00805f9b34fb
+	Client Characteristic Configuration
+Primary Service (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service001d
+	0000180d-0000-1000-8000-00805f9b34fb
+	Heart Rate
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service001d/char0021
+	00002a37-0000-1000-8000-00805f9b34fb
+	Heart Rate Measurement
+Descriptor (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service001d/char0021/desc0023
+	00002902-0000-1000-8000-00805f9b34fb
+	Client Characteristic Configuration
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service001d/char001e
+	00002a38-0000-1000-8000-00805f9b34fb
+	Body Sensor Location
+Descriptor (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service001d/char001e/desc0020
+	00002902-0000-1000-8000-00805f9b34fb
+	Client Characteristic Configuration
+Primary Service (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service000a
+	0000180a-0000-1000-8000-00805f9b34fb
+	Device Information
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service000a/char001b
+	00002a50-0000-1000-8000-00805f9b34fb
+	PnP ID
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service000a/char0019
+	00002a2a-0000-1000-8000-00805f9b34fb
+	IEEE 11073-20601 Regulatory Cert. Data List
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service000a/char0017
+	00002a23-0000-1000-8000-00805f9b34fb
+	System ID
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service000a/char0015
+	00002a28-0000-1000-8000-00805f9b34fb
+	Software Revision String
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service000a/char0013
+	00002a27-0000-1000-8000-00805f9b34fb
+	Hardware Revision String
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service000a/char0011
+	00002a26-0000-1000-8000-00805f9b34fb
+	Firmware Revision String
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service000a/char000f
+	00002a25-0000-1000-8000-00805f9b34fb
+	Serial Number String
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service000a/char000d
+	00002a24-0000-1000-8000-00805f9b34fb
+	Model Number String
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service000a/char000b
+	00002a29-0000-1000-8000-00805f9b34fb
+	Manufacturer Name String
+Primary Service (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service0004
+	0000ae00-0000-1000-8000-00805f9b34fb
+	Unknown
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service0004/char0007
+	0000ae02-0000-1000-8000-00805f9b34fb
+	Unknown
+Descriptor (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service0004/char0007/desc0009
+	00002902-0000-1000-8000-00805f9b34fb
+	Client Characteristic Configuration
+Characteristic (Handle 0x0000)
+	/org/bluez/hci0/dev_0A_93_79_0C_DD_20/service0004/char0005
+	0000ae01-0000-1000-8000-00805f9b34fb
+	Unknown
+[0;94m[DG01][0m# quit
+[0;94m[DG01][0m#                    

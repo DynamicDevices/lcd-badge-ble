@@ -1,0 +1,14 @@
+[package]
+name = "dg01-ble"
+version = "0.1.0"
+edition = "2021"
+description = "BLE helper for DG01 / SuperBand-style devices (Linux BlueZ via bluer)"
+
+[dependencies]
+anyhow = "1.0.102"
+bluer = { version = "0.17.4", features = ["bluetoothd"] }
+chrono = "0.4"
+clap = { version = "4.6.0", features = ["derive"] }
+futures = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+uuid = "1"

@@ -1,0 +1,24 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Rust
+**/target/
+
+# Large / regenerated reverse-engineering artifacts (keep locally)
+*.apk
+superband_jadx_src/
+tools/
+
+# BLE captures and download scratch
+*.btsnoop
+uptodown_dw.html
+*.log
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
