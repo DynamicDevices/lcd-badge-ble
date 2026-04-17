@@ -208,6 +208,19 @@ Responses are correlated by sequence in `WatchThemeTools.response` (expects stat
 
 **Linux try:** `cargo run --release -- upload-dial --addr <MAC> --solid` sends a solid RGB565 test pattern (default 360×360 red). Use `--file watchface.bin` for a raw blob, or `--file export.bmp --strip-bmp` to mimic APK `getNotHeaderBmp`. If the device uses 120-byte chunks, add `--chunk 120`. Image bytes must match what the firmware expects (often RGB565 from server-exported “dial” assets — a plain PNG will not work without conversion).
 
+### iPhone app, watchface, and “is this firmware?”
+
+The **SuperBand** iOS app and the decompiled **Android** APK are the same **FitPro-class** OEM stack: high-level features call into **`xfkj.fitpro`**; custom payloads are **`0xCD` frames** written to the **main UART TX** characteristic (APK **`6e400002…`**; DG01 exposes **`7e400002…`** — same layout, different first nibble). There is no separate public spec for DG01.
+
+| What you mean | In the APK | Practical first step on Linux |
+|---------------|------------|-------------------------------|
+| **Library watchface / on-device dial skin** | **`WatchThemeTools`** → command **31** (sub 2 start, sub 1 file chunks, sub 3 finish) | **`dg01-ble upload-dial --protocol dial31`** (add `--preflight` / `--preflight-upload2` / `--chunk 120` if traces require it) |
+| **Some other “file” or asset the app labels differently** | **`BleFileSendTools`** → command **34** (parallel chunk/start/finish framing) | **`upload-dial --protocol file34`** |
+| **Actual MCU / radio firmware update** | Separate **OTA / DFU** stacks (JieLi, Realtek, Beken, Telink, … in blobs) + settings like **enter OTA mode** (`getEnterOtaMode` / cmd **18** sub **25**) | **Not** the dial **31** image bytes — needs the vendor’s DFU transport (often USB, UART, or a different BLE service/characteristic). |
+| **Unknown: bulk on custom GATT (`3802` / `4A02`)** | Hypothesis only for this badge | **HCI capture** while the official app sends an image — see whether **all** bytes go to **NUS TX** or split to **`3802`** (still **open** in the table below). |
+
+**Ground truth:** one **btsnoop** (Android SuperBand) or **Sniffer** capture during a single successful phone upload beats guessing. Align handles with `gatt_dump_dg01.txt` / `device-info` so you know which ATT destination matches **`7e400002`**.
+
 ### Other commands worth tracing
 
 - **`SendData.getFileDataValue` / `getFileStartValue` / `getFileFinishValue`:** command **34** — alternate “file” path used elsewhere in the app.
