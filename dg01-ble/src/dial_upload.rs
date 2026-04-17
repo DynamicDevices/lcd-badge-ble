@@ -159,6 +159,44 @@ pub fn parse_dc_short(packet: &[u8]) -> Option<(u8, u8)> {
     Some((packet[3], packet[4]))
 }
 
+/// APK `getSetInfoByKey` sub-key names (cmd **26**) — partial map from `SendData` / setting keys; best-effort labels.
+pub fn cmd26_info_key_label(key: u8) -> Option<&'static str> {
+    Some(match key {
+        1 => "personal / profile",
+        10 => "classic Bluetooth address",
+        12 => "device info (APK key 12)",
+        15 => "info key 15",
+        16 => "hardware revision string",
+        17 => "info key 17",
+        20 => "product / model string",
+        21 => "language",
+        _ => return None,
+    })
+}
+
+/// Human-readable line for an 8-byte **`0xDC`** notify (cmd + sub in bytes 3–4; tail bytes 5–7 firmware-specific).
+pub fn decode_dc_notify_line(packet: &[u8]) -> Option<String> {
+    if packet.first().copied() != Some(0xDC) || packet.len() < 8 {
+        return None;
+    }
+    let cmd = packet[3];
+    let sub = packet[4];
+    let t0 = packet[5];
+    let t1 = packet[6];
+    let t2 = packet[7];
+    if cmd == 26 {
+        let label = cmd26_info_key_label(sub)
+            .map(|s| format!(" ({s})"))
+            .unwrap_or_default();
+        return Some(format!(
+            "  decode: short 0xDC ack — getSetInfoByKey cmd26, key {sub}{label}; tail [{t0:02x} {t1:02x} {t2:02x}] (ACK/status — hardware/product text often follows in a 0xCD packet on some builds)"
+        ));
+    }
+    Some(format!(
+        "  decode: short 0xDC — cmd {cmd}, sub {sub}; tail [{t0:02x} {t1:02x} {t2:02x}]"
+    ))
+}
+
 pub fn parse_cd_notify_status(packet: &[u8]) -> Option<i32> {
     if packet.first()? != &0xCD || packet.len() < 12 {
         return None;
@@ -233,6 +271,16 @@ mod tests {
     fn dc_short_file34_start_sample() {
         let s = [0xDCu8, 0x00, 0x05, 0x22, 0x02, 0x00, 0x10, 0x00];
         assert_eq!(parse_dc_short(&s), Some((34, 2)));
+    }
+
+    #[test]
+    fn decode_dc_cmd26_keys_16_and_20_sample() {
+        let k16 = [0xDCu8, 0x00, 0x05, 0x1a, 0x10, 0x00, 0x08, 0x01];
+        let k20 = [0xDCu8, 0x00, 0x05, 0x1a, 0x14, 0x00, 0x08, 0x01];
+        assert!(decode_dc_notify_line(&k16).unwrap().contains("key 16"));
+        assert!(decode_dc_notify_line(&k16).unwrap().contains("hardware"));
+        assert!(decode_dc_notify_line(&k20).unwrap().contains("key 20"));
+        assert!(decode_dc_notify_line(&k20).unwrap().contains("product"));
     }
 
     #[test]

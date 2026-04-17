@@ -14,11 +14,13 @@
 //! cd dg01-ble && cargo run --release -- upload-dial --addr ... --solid --skip-start-ack
 //! cd dg01-ble && cargo run --release -- scan --seconds 15
 //! cd dg01-ble && cargo run --release -- is-connected --addr 0A:93:79:0C:DD:20
+//! cd dg01-ble && cargo run --release -- device-info --addr 0A:93:79:0C:DD:20   # DIS + Battery (0x180A, 0x180F)
 //! cd dg01-ble && cargo run --release -- connect --addr 0A:93:79:0C:DD:20
 //! cd dg01-ble && cargo run --release -- disconnect --addr 0A:93:79:0C:DD:20
 //! ```
 
 mod dial_upload;
+mod device_info_gatt;
 
 use anyhow::{bail, Context};
 use chrono::{Datelike, Local, Timelike};
@@ -28,7 +30,7 @@ use bluer::{Adapter, AdapterEvent, Address, Device, DiscoveryFilter, DiscoveryTr
 use clap::{Parser, Subcommand};
 use futures::{pin_mut, StreamExt};
 use dial_upload::{
-    dial_device_control_response, dial_file_frame, dial_finish_payload, dial_start,
+    decode_dc_notify_line, dial_device_control_response, dial_file_frame, dial_finish_payload, dial_start,
     file34_file_frame, file34_finish_frame, file34_start, parse_cd_notify_status, parse_dc_short,
     parse_dial_watch_ack_status, solid_rgb565_buffer, strip_bmp_rgb565_tail, CdNotifyAssembler,
     CMD_DIAL_TRANSFER, CMD_FILE_UART, SUB_DIAL_FINISH, SUB_DIAL_START,
@@ -188,6 +190,15 @@ enum Command {
         /// Pause between writes (milliseconds)
         #[arg(long, default_value_t = 150)]
         gap_ms: u64,
+
+        #[arg(long)]
+        disconnect: bool,
+    },
+    /// Read standard Bluetooth **Device Information** (0x180A) and **Battery** (0x180F) services.
+    /// Output is similar to nRF Connect / BLE scanner apps (DIS strings + PnP ID + battery %).
+    DeviceInfo {
+        #[arg(long)]
+        addr: String,
 
         #[arg(long)]
         disconnect: bool,
@@ -468,6 +479,9 @@ async fn main() -> anyhow::Result<()> {
                 disconnect,
             )
             .await?;
+        }
+        Command::DeviceInfo { addr, disconnect } => {
+            cmd_device_info(&adapter, &addr, disconnect).await?;
         }
         Command::Scan {
             seconds,
@@ -857,7 +871,12 @@ async fn cmd_query(
         println!("\ncmd26 key {key}: write {}", hex(&frame));
         write_ch.write(&frame).await.context("write")?;
         match tokio::time::timeout(wait, notify_stream.next()).await {
-            Ok(Some(data)) => println!("  notify: {}", hex(&data)),
+            Ok(Some(data)) => {
+                println!("  notify: {}", hex(&data));
+                if let Some(line) = decode_dc_notify_line(&data) {
+                    println!("{line}");
+                }
+            }
             Ok(None) => println!("  (notify stream ended)"),
             Err(_) => println!("  (timeout, no notify)"),
         }
@@ -869,7 +888,12 @@ async fn cmd_query(
         println!("\ncmd32 key {key}: write {}", hex(&frame));
         write_ch.write(&frame).await.context("write")?;
         match tokio::time::timeout(wait, notify_stream.next()).await {
-            Ok(Some(data)) => println!("  notify: {}", hex(&data)),
+            Ok(Some(data)) => {
+                println!("  notify: {}", hex(&data));
+                if let Some(line) = decode_dc_notify_line(&data) {
+                    println!("{line}");
+                }
+            }
             Ok(None) => println!("  (notify stream ended)"),
             Err(_) => println!("  (timeout, no notify)"),
         }
@@ -1821,6 +1845,38 @@ async fn cmd_is_connected(
     println!("  ACL up (skip Connect if true)       = {c}");
     if !c {
         bail!("not connected per BlueZ (Connected=false)");
+    }
+    Ok(())
+}
+
+/// GATT **Device Information** (0x180A) — decoded reads like BLE scanner apps.
+async fn cmd_device_info(
+    adapter: &Adapter,
+    addr_str: &str,
+    disconnect_after: bool,
+) -> anyhow::Result<()> {
+    let addr: Address = addr_str
+        .parse()
+        .with_context(|| format!("invalid BLE address: {addr_str}"))?;
+
+    warm_scan_le_if_unseen(adapter, addr, 0).await?;
+
+    let device = adapter.device(addr).context("adapter.device")?;
+    println!("Device {} (adapter {})", addr, adapter.name());
+
+    if let Err(e) = device.set_trusted(true).await {
+        eprintln!("Warning: could not set Trusted=true ({e})");
+    }
+
+    println!("Connecting (timeout {:?})…", BLE_CONNECT_TIMEOUT);
+    device_connect(&device, BLE_CONNECT_TIMEOUT, None).await?;
+
+    device_info_gatt::print_device_information(&device).await?;
+    device_info_gatt::print_battery_service(&device).await?;
+
+    if disconnect_after {
+        device_disconnect_best_effort(&device).await;
+        println!("Disconnected.");
     }
     Ok(())
 }

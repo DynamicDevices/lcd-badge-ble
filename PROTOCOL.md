@@ -71,7 +71,7 @@ After the peripheral is connected, read DIS / battery by **16-bit UUID** (same a
 | `0x2A24` | Model Number |
 | `0x2A26` | Software Revision String |
 | `0x2A27` | Hardware Revision String |
-| `0x2A19` | Battery Level (single byte, 0–100) |
+| `0x2A19` | Battery Level (SIG: one byte 0–100; DG01 may return **2+ octets** — first octet often still %, rest OEM/padding) |
 
 Example (adjust MAC; use `7e400002…` NUS on DG01 for **vendor** writes, not for these reads):
 
@@ -89,6 +89,7 @@ Decode hex payloads as **ASCII** for string characteristics (e.g. `56 30 33 37 3
 
 - **`bluetoothctl info`:** name **`DG01`**, **Device Information**, **Battery**, **NUS** `7e400001…`, vendor **`3802`**, manufacturer data company id **`0xAA01`** (payload begins with BD_ADDR bytes).
 - **GATT read:** at least one DIS-style read returned ASCII **`LJ733_MB_V1.1`** (internal hardware / board string). **`V32399`** in the app UI and **`LJ733_MB_V1.1`** over GATT are **different identifiers** (UI / product vs BLE-exposed revision string).
+- **`dg01-ble device-info`:** reads DIS + battery service; example battery level read **`1a 00`** → **26%** with trailing **`00`** (non-SIG multi-octet pattern).
 - **Vendor UART (`dg01-ble query`):** `getSetInfoByKey` (**cmd 26**) with key **20** returns a notify whose payload includes the **public address** `0a 93 79 0c dd 20`. Other keys (`1`, `10`, `12`, …) return **short `0xDC` frames**, **assembled `0xCD`**, or **sport / noise-shaped** packets — the **`query`** command only waits for the **first** notify per write; full multi-part **`0xCD`** replies may need the same **reassembly** logic as `upload-dial` (`CdNotifyAssembler`).
 
 ```bash
@@ -107,7 +108,7 @@ cd dg01-ble && cargo run --release -- query --addr 0A:93:79:0C:DD:20 \
 | Item | Purpose |
 |------|--------|
 | `ebadge_inspect.py` | Scan / detect `DG01`, optional GATT dump via Bleak (`--pair`, `--connect-timeout`, etc.) |
-| `dg01-ble/` | Rust CLI on **Linux BlueZ** (`bluer`): `find`, **`sync-time`**, **`query`**, **`upload-dial`** (cmd **31** watchface transfer: start / chunked file / finish — see `WatchThemeTools`), `scan` — same DBus path as **`bluetoothctl`**. Build: `cd dg01-ble && cargo build --release` |
+| `dg01-ble/` | Rust CLI on **Linux BlueZ** (`bluer`): `find`, **`sync-time`**, **`query`**, **`device-info`** (SIG **0x180A** + **0x180F** GATT reads, scanner-style decode), **`upload-dial`** (cmd **31** watchface transfer: start / chunked file / finish — see `WatchThemeTools`), `scan` — same DBus path as **`bluetoothctl`**. Build: `cd dg01-ble && cargo build --release` |
 | `capture_le_passive.sh` | `btmon` + scan (needs `sudo`); HCI to `.btsnoop` for Wireshark |
 | `gatt_dump_dg01.txt` | One successful **`bluetoothctl`** `list-attributes` capture |
 

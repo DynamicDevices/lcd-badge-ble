@@ -6,7 +6,7 @@ BLE tooling and protocol / reverse-engineering notes for **DG01**-class LCD pins
 
 | Path | Purpose |
 |------|---------|
-| `dg01-ble/` | Rust CLI on Linux (BlueZ via **bluer**): `scan`, `find`, `sync-time`, `query`, `upload-dial` (cmd 31 watchface) — see **Find device** below |
+| `dg01-ble/` | Rust CLI on Linux (BlueZ via **bluer**): `scan`, `find`, `sync-time`, `query`, **`device-info`** (SIG GATT **0x180A** DIS + **0x180F** battery, scanner-style decode), `upload-dial` (cmd 31 watchface) — see below |
 | `PROTOCOL.md` | GATT map, framing, command IDs from APK analysis and local captures |
 | `ebadge_inspect.py`, `superband_find_device.py` | Python helpers (Bleak path; flaky vs BlueZ in practice) |
 | `capture_le_passive.sh`, `apk-get` | Shell helpers |
@@ -42,6 +42,22 @@ Optional **`--warm-scan-secs N`** ( **`N` > 0** ): run LE discovery only when th
 If the **phone app** holds the only LE link, disconnect it or turn phone Bluetooth off so Linux can connect.
 
 Quick BlueZ check (no `Connect`): `cargo run --release -- is-connected --addr 0A:93:79:0C:DD:20`. Exit status **1** if **`Connected`** is false (prints **`ServicesResolved`** for info only).
+
+## Standard GATT: Device Information + Battery (`device-info`)
+
+Subcommand **`device-info`** connects and reads:
+
+- **Device Information (0x180A):** manufacturer, model, serial, firmware, hardware, software, system ID, IEEE regulatory, **PnP ID** — decoded like nRF Connect (UTF-8 strings; PnP fields broken out).
+- **Battery Service (0x180F):** **Battery Level (0x2A19)** — SIG defines one octet 0–100 as %; some OEMs (including DG01 here) return **extra octets**; the tool shows **first octet as %** when ≤100 and prints trailing bytes as hex.
+
+If **0x180F** is absent, a one-line notice is printed; **0x180A** is still required for the command to succeed.
+
+```bash
+cd dg01-ble && cargo run --release -- device-info --addr 0A:93:79:0C:DD:20
+cd dg01-ble && cargo run --release -- device-info --addr 0A:93:79:0C:DD:20 --disconnect
+```
+
+Vendor UART **`query`** (cmd 26) is separate from SIG GATT — use both if you want APK-style keys **and** standard DIS/battery reads.
 
 ## License
 
