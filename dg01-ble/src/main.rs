@@ -384,9 +384,10 @@ enum Command {
         #[arg(long)]
         dial32_sub3_control: Option<u8>,
 
-        /// Do not wait for notify status **1000** after dial start (cmd 31 sub 2). Use when the device
-        /// sends the first file chunk without a prior start ACK (matches `upload-2.log.pcapng`: no notify
-        /// between start write and first chunk).
+        /// Do not wait for notify status **1000** after dial start (cmd 31 sub 2). Prefer leaving this
+        /// **off** so the firmware completes the same handshake as the APK (often required for the badge’s
+        /// “uploading” screen). Only enable when the device never sends a parsable start ACK (e.g. some
+        /// captures show chunks before any start notify).
         #[arg(long)]
         skip_start_ack: bool,
 

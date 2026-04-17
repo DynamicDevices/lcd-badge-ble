@@ -69,6 +69,8 @@ cd dg01-ble && cargo run --release -- dial-dims --addr 0A:93:79:0C:DD:20 --disco
 
 There is **no** CLI command to list the phone-style **catalogue of installed watch faces** — that UI is driven by the app’s **HTTP API**; see **[PROTOCOL.md](PROTOCOL.md)** (watchface section).
 
+**Uploading splash on the badge:** the stock app waits for a **start ACK** (status **1000**) after **cmd 31/2** before sending chunks; **`--skip-start-ack`** skips that wait and may mean the device **never shows** the uploading screen even if data still transfers — see **[PROTOCOL.md](PROTOCOL.md)**.
+
 ## License
 
 Tooling and documentation in this repository are provided as-is for interoperability research. Third-party apps and firmware remain under their respective terms.

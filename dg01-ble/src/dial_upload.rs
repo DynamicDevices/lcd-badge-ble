@@ -53,14 +53,21 @@ impl CdNotifyAssembler {
     }
 }
 
-/// Status int for dial upload — **cmd 32** + sub **1** (APK `setDialUpdateInfo`). Some firmware may echo **cmd 31**.
+/// Status int for dial upload (`WatchThemeTools.response` / `parseDialUpCode`).
+///
+/// **Chunk ACKs** use **cmd 31 or 32** + sub **1** (same as APK `setDialUpdateInfo` when `bResultValueItem == 1`).
+/// **Start ACK** (status **1000** before first file chunk — the step that arms the badge “uploading” UI in the
+/// stock app) is sometimes sent as **cmd 31** + sub **2** (mirror of `getDialUpdateStartValue`), which we
+/// previously ignored — leading to `--skip-start-ack` and no on-device upload splash.
 pub fn parse_dial_watch_ack_status(packet: &[u8]) -> Option<i32> {
     let cmd = packet.get(3).copied()?;
     let sub = packet.get(5).copied()?;
-    if sub != SUB_DIAL_NOTIFY_FILE {
+    if cmd != CMD_DIAL_NOTIFY && cmd != CMD_DIAL_TRANSFER {
         return None;
     }
-    if cmd != CMD_DIAL_NOTIFY && cmd != CMD_DIAL_TRANSFER {
+    let chunk_or_start_ack = sub == SUB_DIAL_NOTIFY_FILE
+        || (cmd == CMD_DIAL_TRANSFER && sub == SUB_DIAL_START);
+    if !chunk_or_start_ack {
         return None;
     }
     parse_cd_notify_status(packet)
@@ -302,6 +309,14 @@ mod tests {
     fn dc_short_file34_start_sample() {
         let s = [0xDCu8, 0x00, 0x05, 0x22, 0x02, 0x00, 0x10, 0x00];
         assert_eq!(parse_dc_short(&s), Some((34, 2)));
+    }
+
+    #[test]
+    fn parse_dial_watch_ack_accepts_cmd31_sub2_start_ok() {
+        // Firmware may ACK dial **start** (cmd 31 sub 2) with status **1000** in first payload u32 BE — not sub 1.
+        let mut pkt = vec![0xCDu8, 0x00, 0x09, CMD_DIAL_TRANSFER, 1, SUB_DIAL_START, 0, 4];
+        pkt.extend_from_slice(&1000i32.to_be_bytes());
+        assert_eq!(parse_dial_watch_ack_status(&pkt), Some(1000));
     }
 
     #[test]
