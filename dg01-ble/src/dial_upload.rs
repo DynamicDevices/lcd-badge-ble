@@ -13,6 +13,8 @@ pub const CMD_FILE_UART: u8 = 34;
 pub const CMD_DIAL_NOTIFY: u8 = 32;
 /// Sub-key **1** routes to `WatchThemeTools.response` (file chunk / dial transfer ACK).
 pub const SUB_DIAL_NOTIFY_FILE: u8 = 1;
+/// Sub-key **2** — `SendData.getDialClockInfo` / `getReadDialValue(2)` → `BaseReceiveData.parseDialInfo`.
+pub const SUB_DIAL_NOTIFY_CLOCK_INFO: u8 = 2;
 
 /// Reassembles `0xCD` frames split across multiple BLE notifications (`BaseReceiveData.testParse2`).
 #[derive(Default)]
@@ -212,6 +214,35 @@ pub fn parse_cd_notify_status(packet: &[u8]) -> Option<i32> {
     Some(i32::from_be_bytes([p[0], p[1], p[2], p[3]]))
 }
 
+/// Clock/dial screen info from **cmd 32** sub **2** (`BaseReceiveData.parseDialInfo`).
+///
+/// The APK hex-decodes the payload **after** the 8-byte `0xCD` header; first fields are:
+/// `screenType`, `grade`, then **big-endian** `width`, `height` (`NumberUtils.bytesToShort` on each pair).
+pub fn parse_dial_clock_info_cd(packet: &[u8]) -> Option<(u8, u8, u16, u16)> {
+    if packet.first().copied()? != 0xCD {
+        return None;
+    }
+    if packet.len() < 8 + 6 {
+        return None;
+    }
+    if packet.get(3).copied()? != CMD_DIAL_NOTIFY {
+        return None;
+    }
+    if packet.get(5).copied()? != SUB_DIAL_NOTIFY_CLOCK_INFO {
+        return None;
+    }
+    let plen = u16::from_be_bytes([packet[6], packet[7]]) as usize;
+    if plen < 6 || packet.len() < 8 + plen {
+        return None;
+    }
+    let p = &packet[8..8 + plen];
+    let screen = p[0];
+    let grade = p[1];
+    let width = u16::from_be_bytes([p[2], p[3]]);
+    let height = u16::from_be_bytes([p[4], p[5]]);
+    Some((screen, grade, width, height))
+}
+
 /// Match `WatchThemeTools.getNotHeaderBmp`: keep last `width * height * 2` bytes (RGB565 body).
 pub fn strip_bmp_rgb565_tail(bmp: &[u8], width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
     let need = (width as usize)
@@ -271,6 +302,16 @@ mod tests {
     fn dc_short_file34_start_sample() {
         let s = [0xDCu8, 0x00, 0x05, 0x22, 0x02, 0x00, 0x10, 0x00];
         assert_eq!(parse_dc_short(&s), Some((34, 2)));
+    }
+
+    #[test]
+    fn parse_dial_clock_info_matches_apk_layout() {
+        // Minimal cmd32/2 packet: 8-byte header + 6-byte payload (screen, grade, w=360, h=360 BE).
+        // len_field = total_len - 3 = 14 - 3 = 11 → bytes [1,2] = 00 0b
+        let mut pkt = vec![0xCDu8, 0x00, 0x0b, 32, 1, 2, 0, 6];
+        pkt.extend_from_slice(&[0u8, 0, 0x01, 0x68, 0x01, 0x68]);
+        let r = parse_dial_clock_info_cd(&pkt).expect("parse");
+        assert_eq!(r, (0, 0, 360, 360));
     }
 
     #[test]

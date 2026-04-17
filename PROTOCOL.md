@@ -108,7 +108,7 @@ cd dg01-ble && cargo run --release -- query --addr 0A:93:79:0C:DD:20 \
 | Item | Purpose |
 |------|--------|
 | `ebadge_inspect.py` | Scan / detect `DG01`, optional GATT dump via Bleak (`--pair`, `--connect-timeout`, etc.) |
-| `dg01-ble/` | Rust CLI on **Linux BlueZ** (`bluer`): `find`, **`sync-time`**, **`query`**, **`device-info`** (SIG **0x180A** + **0x180F** GATT reads, scanner-style decode), **`upload-dial`** (cmd **31** watchface transfer: start / chunked file / finish — see `WatchThemeTools`), `scan` — same DBus path as **`bluetoothctl`**. Build: `cd dg01-ble && cargo build --release` |
+| `dg01-ble/` | Rust CLI on **Linux BlueZ** (`bluer`): `find`, **`sync-time`**, **`query`**, **`device-info`** (SIG **0x180A** + **0x180F** GATT reads, scanner-style decode), **`dial-dims`** (cmd **32** sub **2** — read firmware **width×height** like APK `getDialClockInfo`), **`upload-dial`** (cmd **31** watchface transfer; use **`--use-device-dial-dims`** to match APK `ClockDialInfoBody`), `scan` — same DBus path as **`bluetoothctl`**. Build: `cd dg01-ble && cargo build --release` |
 | `capture_le_passive.sh` | `btmon` + scan (needs `sudo`); HCI to `.btsnoop` for Wireshark |
 | `gatt_dump_dg01.txt` | One successful **`bluetoothctl`** `list-attributes` capture |
 
@@ -206,7 +206,13 @@ Defined in `Profile.PBSmartBandCommandId` / `SendData` / `WatchThemeTools`:
 
 Responses are correlated by sequence in `WatchThemeTools.response` (expects status codes `1000+n` for ACK of chunk `n`, etc.).
 
-**Linux try:** `cargo run --release -- upload-dial --addr <MAC> --solid` sends a solid RGB565 test pattern (default 360×360 red). Use `--file watchface.bin` for a raw blob, or `--file export.bmp --strip-bmp` to mimic APK `getNotHeaderBmp`. If the device uses 120-byte chunks, add `--chunk 120`. Image bytes must match what the firmware expects (often RGB565 from server-exported “dial” assets — a plain PNG will not work without conversion).
+**Correct width × height:** the APK does **not** hardcode a single resolution. It stores **`ClockDialInfoBody.width` / `.height`** from the device response to **`getDialClockInfo`** (**cmd 32** sub **2**), parsed in `BaseReceiveData.parseDialInfo` (same layout as `dg01-ble`’s `parse_dial_clock_info_cd`). **`dg01-ble dial-dims`** sends that read and prints raw notifies plus parsed **width** / **height** (and **RGB565** byte count). Prefer **`upload-dial --use-device-dial-dims`** so the tool reads those values before `--solid` / `--strip-bmp`; only use **`--width` / `--height`** when you already know them or are testing.
+
+**Linux try — read dimensions only:** `cargo run --release -- dial-dims --addr <MAC> --disconnect` sends **`getDialClockInfo`** (cmd **32** sub **2**), reassembles split **`0xCD`** notifies, and prints **screenType**, **grade**, **width**, **height**, and **width×height×2** (RGB565 body size). Example on DG01: **360×360** → **259200** bytes.
+
+**Linux try — upload:** `cargo run --release -- upload-dial --addr <MAC> --solid --use-device-dial-dims` sends a solid RGB565 test pattern at the firmware-reported size. Without that flag, defaults are 360×360 (common for this class of panel, not guaranteed). Use `--file watchface.bin` for a raw blob, or `--file export.bmp --strip-bmp` to mimic APK `getNotHeaderBmp`. If the device uses 120-byte chunks, add `--chunk 120`. Image bytes must match what the firmware expects (often RGB565 from server-exported “dial” assets — a plain PNG will not work without conversion).
+
+**Listing “installed” watch faces:** the decompiled SuperBand / FitPro app loads **watch theme catalogues from the vendor HTTP API** (`HttpHelper` / `queryWatchThemeDetails`, etc.), not from a documented UART enumerator. Over the UART pipe, **`cmd 32`** exposes **sub-keys** such as **1** (dial transfer / status), **2** (clock/dial **info** — dimensions and model strings), **3** (device control / enter watch-theme flow) — see `SendData.getReadDialValue` / `getDialDeviceContrlReponse`. There is **no** known **`dg01-ble`** command that prints a multi-item “library of installed faces” like the app UI; inferring what is stored on the badge would require firmware-specific behaviour or a capture of any extra **`cmd 26`** keys / vendor frames not yet mapped here.
 
 ### iPhone app, watchface, and “is this firmware?”
 

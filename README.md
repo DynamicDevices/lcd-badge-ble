@@ -6,7 +6,7 @@ BLE tooling and protocol / reverse-engineering notes for **DG01**-class LCD pins
 
 | Path | Purpose |
 |------|---------|
-| `dg01-ble/` | Rust CLI on Linux (BlueZ via **bluer**): `scan`, `find`, `sync-time`, `query`, **`device-info`** (SIG GATT **0x180A** DIS + **0x180F** battery, scanner-style decode), `upload-dial` (cmd 31 watchface) — see below |
+| `dg01-ble/` | Rust CLI on Linux (BlueZ via **bluer**): `scan`, `find`, `sync-time`, `query`, **`device-info`** (SIG GATT **0x180A** DIS + **0x180F** battery, scanner-style decode), **`dial-dims`** (cmd 32/2 — firmware watchface **width×height**), `upload-dial` (cmd 31; **`--use-device-dial-dims`** matches APK sizing) — see **[PROTOCOL.md](PROTOCOL.md)** |
 | `PROTOCOL.md` | GATT map, framing, command IDs from APK analysis and local captures |
 | `ebadge_inspect.py`, `superband_find_device.py` | Python helpers (Bleak path; flaky vs BlueZ in practice) |
 | `capture_le_passive.sh`, `apk-get` | Shell helpers |
@@ -58,6 +58,16 @@ cd dg01-ble && cargo run --release -- device-info --addr 0A:93:79:0C:DD:20 --dis
 ```
 
 Vendor UART **`query`** (cmd 26) is separate from SIG GATT — use both if you want APK-style keys **and** standard DIS/battery reads.
+
+## Dial dimensions (`dial-dims`)
+
+**`dial-dims`** sends the same **`getDialClockInfo`** frame as the Android app (**cmd 32** sub **2**), reassembles **`0xCD`** notifications if split, and prints **width**, **height**, and expected **RGB565** payload size. Use this before **`upload-dial`** or pass **`--use-device-dial-dims`** on upload so image size is not guessed.
+
+```bash
+cd dg01-ble && cargo run --release -- dial-dims --addr 0A:93:79:0C:DD:20 --disconnect
+```
+
+There is **no** CLI command to list the phone-style **catalogue of installed watch faces** — that UI is driven by the app’s **HTTP API**; see **[PROTOCOL.md](PROTOCOL.md)** (watchface section).
 
 ## License
 

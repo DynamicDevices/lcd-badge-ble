@@ -11,6 +11,7 @@
 //! cd dg01-ble && cargo run --release -- find --addr ... --notify-first   # APK-style: notify on before TX
 //! cd dg01-ble && cargo run --release -- sync-time --addr 0A:93:79:0C:DD:20
 //! cd dg01-ble && cargo run --release -- query --addr 0A:93:79:0C:DD:20
+//! cd dg01-ble && cargo run --release -- dial-dims --addr 0A:93:79:0C:DD:20
 //! cd dg01-ble && cargo run --release -- upload-dial --addr ... --solid --skip-start-ack
 //! cd dg01-ble && cargo run --release -- scan --seconds 15
 //! cd dg01-ble && cargo run --release -- is-connected --addr 0A:93:79:0C:DD:20
@@ -32,8 +33,9 @@ use futures::{pin_mut, StreamExt};
 use dial_upload::{
     decode_dc_notify_line, dial_device_control_response, dial_file_frame, dial_finish_payload, dial_start,
     file34_file_frame, file34_finish_frame, file34_start, parse_cd_notify_status, parse_dc_short,
-    parse_dial_watch_ack_status, solid_rgb565_buffer, strip_bmp_rgb565_tail, CdNotifyAssembler,
-    CMD_DIAL_TRANSFER, CMD_FILE_UART, SUB_DIAL_FINISH, SUB_DIAL_START,
+    parse_dial_clock_info_cd, parse_dial_watch_ack_status, solid_rgb565_buffer, strip_bmp_rgb565_tail,
+    CdNotifyAssembler, CMD_DIAL_TRANSFER, CMD_FILE_UART, SUB_DIAL_FINISH, SUB_DIAL_NOTIFY_CLOCK_INFO,
+    SUB_DIAL_START,
 };
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -194,6 +196,31 @@ enum Command {
         #[arg(long)]
         disconnect: bool,
     },
+    /// Read dial clock info (**cmd 32** sub **2** — APK `getDialClockInfo`): print raw notifies and parsed width×height.
+    DialDims {
+        #[arg(long)]
+        addr: String,
+
+        #[arg(long, default_value = DEFAULT_WRITE_UUID)]
+        write_uuid: String,
+
+        #[arg(long, default_value = DEFAULT_NOTIFY_UUID)]
+        notify_uuid: String,
+
+        #[arg(long)]
+        apk_uart: bool,
+
+        /// Total time to wait for a complete **cmd 32/2** `0xCD` reply (may arrive in multiple notifies).
+        #[arg(long, default_value_t = 6000)]
+        response_timeout_ms: u64,
+
+        /// Milliseconds to wait after notify subscribe before writing **cmd 32/2**.
+        #[arg(long, default_value_t = 200)]
+        notify_settle_ms: u64,
+
+        #[arg(long)]
+        disconnect: bool,
+    },
     /// Read standard Bluetooth **Device Information** (0x180A) and **Battery** (0x180F) services.
     /// Output is similar to nRF Connect / BLE scanner apps (DIS strings + PnP ID + battery %).
     DeviceInfo {
@@ -276,11 +303,18 @@ enum Command {
         #[arg(long)]
         solid: bool,
 
+        /// Ignored when `--use-device-dial-dims` is set (dimensions come from **cmd 32** sub **2**).
         #[arg(long, default_value_t = 360)]
         width: u16,
 
+        /// Ignored when `--use-device-dial-dims` is set.
         #[arg(long, default_value_t = 360)]
         height: u16,
+
+        /// Read `width`/`height` from the badge via **cmd 32** sub **2** (`getDialClockInfo`), same fields as
+        /// APK `BaseReceiveData.parseDialInfo` → `ClockDialInfoBody`. Use this instead of guessing 360×360.
+        #[arg(long)]
+        use_device_dial_dims: bool,
 
         /// Little-endian RGB565 value per pixel when `--solid` (default 63488 = red `0xF800`).
         #[arg(long, default_value_t = 63488)]
@@ -480,6 +514,31 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
         }
+        Command::DialDims {
+            addr,
+            write_uuid,
+            notify_uuid,
+            apk_uart,
+            response_timeout_ms,
+            notify_settle_ms,
+            disconnect,
+        } => {
+            let (w, n) = if apk_uart {
+                (APK_UART_TX.to_string(), APK_UART_NOTIFY.to_string())
+            } else {
+                (write_uuid, notify_uuid)
+            };
+            cmd_dial_dims(
+                &adapter,
+                &addr,
+                &w,
+                &n,
+                response_timeout_ms,
+                notify_settle_ms,
+                disconnect,
+            )
+            .await?;
+        }
         Command::DeviceInfo { addr, disconnect } => {
             cmd_device_info(&adapter, &addr, disconnect).await?;
         }
@@ -532,6 +591,7 @@ async fn main() -> anyhow::Result<()> {
             solid,
             width,
             height,
+            use_device_dial_dims,
             solid_rgb565,
             chunk,
             font_pos,
@@ -572,6 +632,7 @@ async fn main() -> anyhow::Result<()> {
                 solid,
                 width,
                 height,
+                use_device_dial_dims,
                 solid_rgb565,
                 chunk,
                 font_pos,
@@ -907,6 +968,109 @@ async fn cmd_query(
     Ok(())
 }
 
+/// **`getDialClockInfo`** — `SendData.getNoValueProtocol(32, 2)`; reply is **`0xCD`** (often split across notifies).
+async fn cmd_dial_dims(
+    adapter: &Adapter,
+    addr_str: &str,
+    write_uuid_str: &str,
+    notify_uuid_str: &str,
+    response_timeout_ms: u64,
+    notify_settle_ms: u64,
+    disconnect_after: bool,
+) -> anyhow::Result<()> {
+    let addr: Address = addr_str
+        .parse()
+        .with_context(|| format!("invalid BLE address: {addr_str}"))?;
+    let wu = Uuid::parse_str(write_uuid_str).context("write uuid")?;
+    let nu = Uuid::parse_str(notify_uuid_str).context("notify uuid")?;
+
+    let device = adapter.device(addr).context("adapter.device")?;
+    println!("Device {} (adapter {})", addr, adapter.name());
+
+    println!("Calling BlueZ Connect() (same API as Settings / `bluetoothctl connect`)…");
+    device_connect(&device, BLE_CONNECT_TIMEOUT, None).await?;
+
+    let write_ch = find_characteristic(&device, wu)
+        .await
+        .with_context(|| format!("write characteristic not found: {write_uuid_str}"))?;
+    let notify_ch = find_characteristic(&device, nu)
+        .await
+        .with_context(|| format!("notify characteristic not found: {notify_uuid_str}"))?;
+
+    println!("Subscribing to notifications…");
+    let notify_stream = tokio::time::timeout(NOTIFY_ENABLE_TIMEOUT, notify_ch.notify())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "notify subscribe timed out after {:?}",
+                NOTIFY_ENABLE_TIMEOUT
+            )
+        })?
+        .context("notify()")?;
+    pin_mut!(notify_stream);
+
+    println!("Notify settle {} ms…", notify_settle_ms);
+    tokio::time::sleep(Duration::from_millis(notify_settle_ms)).await;
+
+    let frame = get_no_value_protocol(CMD_DIAL_READ, SUB_DIAL_NOTIFY_CLOCK_INFO);
+    println!(
+        "\ngetDialClockInfo — cmd32/2 (APK SendData.getDialClockInfo): write {}",
+        hex(&frame)
+    );
+    write_ch.write(&frame).await.context("write cmd32/2")?;
+
+    let mut asm = CdNotifyAssembler::default();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(response_timeout_ms.max(500));
+
+    while tokio::time::Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(left.min(Duration::from_millis(500)), notify_stream.next()).await {
+            Ok(Some(data)) => {
+                println!("  notify ({} bytes): {}", data.len(), hex(&data));
+                if let Some(line) = decode_dc_notify_line(&data) {
+                    println!("{line}");
+                }
+                for pkt in asm.push(&data) {
+                    println!(
+                        "  assembled 0xCD ({} bytes): {}",
+                        pkt.len(),
+                        hex(&pkt[..pkt.len().min(96)])
+                    );
+                    if pkt.len() > 96 {
+                        println!("    … (truncated in log; full length {})", pkt.len());
+                    }
+                    if let Some((screen, grade, w, h)) = parse_dial_clock_info_cd(&pkt) {
+                        println!("\n--- Parsed dial clock info (BaseReceiveData.parseDialInfo) ---");
+                        println!("  screenType: {screen}");
+                        println!("  grade:      {grade}");
+                        println!("  width:      {w}");
+                        println!("  height:     {h}");
+                        println!(
+                            "  RGB565 payload size (width×height×2): {} bytes",
+                            (w as u32) * (h as u32) * 2
+                        );
+                        if disconnect_after {
+                            device_disconnect_best_effort(&device).await;
+                            println!("\nDisconnected.");
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+            Ok(None) => {
+                bail!("notify stream ended before cmd32/2 dial info reply");
+            }
+            Err(_) => {}
+        }
+    }
+
+    bail!(
+        "timeout after {} ms: no complete cmd32/2 dial clock info (0xCD with width/height). \
+         Try increasing --response-timeout-ms; device may send a long multi-notify frame.",
+        response_timeout_ms
+    );
+}
+
 fn parse_ack_packet(packet: &[u8], loose_ack: bool) -> Option<i32> {
     if loose_ack {
         parse_cd_notify_status(packet)
@@ -1150,6 +1314,49 @@ where
     Ok(())
 }
 
+/// APK `SendData.getDialClockInfo` → `BaseReceiveData.parseDialInfo` (width/height in first 6 payload bytes).
+async fn fetch_dial_clock_dims<S>(
+    write_ch: &Characteristic,
+    stream: &mut S,
+    asm: &mut CdNotifyAssembler,
+) -> anyhow::Result<(u16, u16)>
+where
+    S: futures::Stream<Item = Vec<u8>> + Unpin,
+{
+    println!("Reading dial dimensions (cmd32/2 getDialClockInfo — same as APK ClockDialInfoBody width/height)…");
+    write_ch
+        .write(&get_no_value_protocol(CMD_DIAL_READ, SUB_DIAL_NOTIFY_CLOCK_INFO))
+        .await
+        .context("write cmd32/2 getDialClockInfo")?;
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while tokio::time::Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(left.min(Duration::from_millis(400)), stream.next()).await {
+            Ok(Some(data)) => {
+                for pkt in asm.push(&data) {
+                    if let Some((screen, grade, w, h)) = parse_dial_clock_info_cd(&pkt) {
+                        println!(
+                            "  cmd32/2 dial info: screenType={screen} grade={grade} width={w} height={h}"
+                        );
+                        if w == 0 || h == 0 {
+                            bail!("device reported zero width or height in dial info");
+                        }
+                        return Ok((w, h));
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(_) => {}
+        }
+    }
+    bail!(
+        "timeout waiting for cmd32/2 dial clock info (0xCD frame with width/height). \
+         Check notify subscription, or try without --use-device-dial-dims and pass --width/--height"
+    );
+}
+
 async fn cmd_upload_dial(
     adapter: &Adapter,
     addr_str: &str,
@@ -1158,8 +1365,9 @@ async fn cmd_upload_dial(
     file: Option<&std::path::Path>,
     strip_bmp: bool,
     solid: bool,
-    width: u16,
-    height: u16,
+    mut width: u16,
+    mut height: u16,
+    use_device_dial_dims: bool,
     solid_rgb565: u16,
     chunk: usize,
     font_pos: u8,
@@ -1196,46 +1404,13 @@ async fn cmd_upload_dial(
     if dial_start_probe && use_file34 {
         bail!("--dial-start-probe is only for protocol dial31");
     }
+    if use_device_dial_dims && dial_start_probe {
+        bail!("--use-device-dial-dims is not compatible with --dial-start-probe");
+    }
     let effective_preflight = preflight || preflight_upload2;
     if preflight_upload2 && !preflight {
         println!("Note: --preflight-upload2 implies preflight.");
     }
-
-    let file_data: Vec<u8> = if dial_start_probe {
-        vec![]
-    } else if solid {
-        if file.is_some() {
-            bail!("do not pass --file with --solid");
-        }
-        solid_rgb565_buffer(width, height, solid_rgb565)
-    } else {
-        let p = file.ok_or_else(|| anyhow::anyhow!("pass --file PATH or use --solid"))?;
-        let b = std::fs::read(p).with_context(|| format!("read {}", p.display()))?;
-        if strip_bmp {
-            strip_bmp_rgb565_tail(&b, u32::from(width), u32::from(height))?
-        } else {
-            b
-        }
-    };
-
-    println!(
-        "protocol={} payload={} bytes chunk={} replace_pic_pos={:?} preflight={} preflight_upload2={} cmd26_keys={:?} enter_ota={} dial32_sub3={:?} skip_start_ack={} skip_finish_ack={} loose_ack={} blind_chunks={} chunk_gap_ms={} — first 16: {}",
-        protocol,
-        file_data.len(),
-        chunk,
-        replace_pic_pos,
-        effective_preflight,
-        preflight_upload2,
-        preflight_cmd26_keys,
-        enter_ota_mode,
-        dial32_sub3_control,
-        skip_start_ack,
-        skip_finish_ack,
-        loose_ack,
-        blind_chunks,
-        chunk_gap_ms,
-        hex(&file_data[..file_data.len().min(16)])
-    );
 
     let addr: Address = addr_str
         .parse()
@@ -1277,6 +1452,50 @@ async fn cmd_upload_dial(
 
     let mut asm = CdNotifyAssembler::default();
     let step = Duration::from_millis(step_timeout_ms);
+
+    if use_device_dial_dims {
+        let (w, h) = fetch_dial_clock_dims(&write_ch, &mut notify_stream, &mut asm).await?;
+        width = w;
+        height = h;
+    }
+
+    let file_data: Vec<u8> = if dial_start_probe {
+        vec![]
+    } else if solid {
+        if file.is_some() {
+            bail!("do not pass --file with --solid");
+        }
+        solid_rgb565_buffer(width, height, solid_rgb565)
+    } else {
+        let p = file.ok_or_else(|| anyhow::anyhow!("pass --file PATH or use --solid"))?;
+        let b = std::fs::read(p).with_context(|| format!("read {}", p.display()))?;
+        if strip_bmp {
+            strip_bmp_rgb565_tail(&b, u32::from(width), u32::from(height))?
+        } else {
+            b
+        }
+    };
+
+    println!(
+        "protocol={} size={}×{} payload={} bytes chunk={} replace_pic_pos={:?} preflight={} preflight_upload2={} cmd26_keys={:?} enter_ota={} dial32_sub3={:?} skip_start_ack={} skip_finish_ack={} loose_ack={} blind_chunks={} chunk_gap_ms={} — first 16: {}",
+        protocol,
+        width,
+        height,
+        file_data.len(),
+        chunk,
+        replace_pic_pos,
+        effective_preflight,
+        preflight_upload2,
+        preflight_cmd26_keys,
+        enter_ota_mode,
+        dial32_sub3_control,
+        skip_start_ack,
+        skip_finish_ack,
+        loose_ack,
+        blind_chunks,
+        chunk_gap_ms,
+        hex(&file_data[..file_data.len().min(16)])
+    );
 
     if !preflight_cmd26_keys.is_empty() || enter_ota_mode {
         run_section1_preflight(
@@ -1470,6 +1689,7 @@ async fn cmd_probe_upload(
             false,
             64,
             64,
+            false,
             0,
             ch,
             0,
