@@ -9,7 +9,8 @@ Working notes for the Temu-style **DG01** LCD pin (SuperBand app on iPhone). The
 | GAP name | `DG01` |
 | Public address | `0A:93:79:0C:DD:20` |
 | App | **SuperBand** (e.g. [App Store](https://apps.apple.com/us/app/super-band/id1514892138)), vendor Shenzhen Well Fitness — generic OEM companion |
-| In-app hardware string (screenshot) | `V32399` (internal build / project id; not decoded over BLE yet) |
+| In-app hardware string (screenshot) | `V32399` (internal build / project id; marketing / app UI — **not** the same string as GATT below) |
+| GATT string (Device Information; see § Device information) | `LJ733_MB_V1.1` — likely PCB / internal hardware id (read as ASCII from a DIS characteristic) |
 
 ## Advertising
 
@@ -24,6 +25,8 @@ Working notes for the Temu-style **DG01** LCD pin (SuperBand app on iPhone). The
 - **Bleak** (Python) connect has been **unreliable** here (`TimeoutError`, `Page Timeout`) even when the device is advertising.
 - **BlueZ `bluetoothctl connect <MAC>`** has succeeded when the phone is not holding the link; use **`menu gatt`** / **`list-attributes`** to enumerate GATT when Bleak fails.
 - A captured session: **`gatt_dump_dg01.txt`** (raw `bluetoothctl` output).
+- **`dg01-ble connect` / `disconnect`:** use **`org.bluez.Device1.Connect`** / **`Disconnect`** (same as the Ubuntu **Bluetooth** settings switch). The tool sets **`Trusted=true`** before connect when allowed (useful when the UI shows **Paired: No**). No LE scan by default; **`--warm-scan-secs N`** with **`N`** > 0 runs discovery only if the device is not yet in BlueZ’s cache and you need to create the object before **`Connect`**.
+- **`dg01-ble find`:** calls **`Connect()`** then performs GATT writes. **`ServicesResolved`** is **not** a prerequisite for calling **`Connect`**; GATT discovery follows the ACL. Use **`--connect-timeout-secs`**, **`--nus-profile-connect`**, or **`--reconnect`** if the link is flaky.
 
 ## GATT — services and characteristics
 
@@ -50,6 +53,49 @@ Full UUIDs use the Bluetooth base UUID `0000xxxx-0000-1000-8000-00805f9b34fb` un
 
 **Heart Rate service:** assume **not used** for real HR unless proven; common on cheap BLE stacks copied from wearables examples.
 
+## Device information — GATT (SIG) vs FitPro UART
+
+This is **not** a second protocol — it is **two ways** to learn about the same class of device: **standard Bluetooth** characteristics (always worth reading first) and **vendor commands** over NUS (same `SendData` / `getSetInfoByKey` as the SuperBand APK).
+
+### Methodology reference (similar hardware, not DG01 spec)
+
+[Hacking a FocusFit Pro-Y68 / LT716](https://xor.co.za/post/2022-11-30-hacking-smartwatch/) (xor.co.za, 2022) walks through the same **FitPro**-style stack: **Device Information Service** reads (`0x2A26` firmware string, `0x2A19` battery), **NUS** `6e400002` writes for find-device, and **jadx** on the APK. The **SoC and PCB** there (e.g. Telink TLSR8232, `LT716`) **do not** match DG01; use it as **methodology**, not as wire-level truth for this pin.
+
+### Standard GATT reads (Linux `gatttool` or nRF Connect)
+
+After the peripheral is connected, read DIS / battery by **16-bit UUID** (same as the article’s `gatttool --char-read --uuid=…`):
+
+| UUID | Typical characteristic |
+|------|-------------------------|
+| `0x2A29` | Manufacturer Name |
+| `0x2A24` | Model Number |
+| `0x2A26` | Software Revision String |
+| `0x2A27` | Hardware Revision String |
+| `0x2A19` | Battery Level (single byte, 0–100) |
+
+Example (adjust MAC; use `7e400002…` NUS on DG01 for **vendor** writes, not for these reads):
+
+```bash
+gatttool -b 0A:93:79:0C:DD:20 --char-read --uuid=0x2a29
+gatttool -b 0A:93:79:0C:DD:20 --char-read --uuid=0x2a24
+gatttool -b 0A:93:79:0C:DD:20 --char-read --uuid=0x2a26
+gatttool -b 0A:93:79:0C:DD:20 --char-read --uuid=0x2a27
+gatttool -b 0A:93:79:0C:DD:20 --char-read --uuid=0x2a19
+```
+
+Decode hex payloads as **ASCII** for string characteristics (e.g. `56 30 33 37 36 37` → `V03767` on the article’s watch). **`bluetoothctl info <MAC>`** lists **Name** and **UUIDs** (DIS, Battery, NUS, `3802`, etc.) without parsing characteristics.
+
+### Observed on DG01 (this repo)
+
+- **`bluetoothctl info`:** name **`DG01`**, **Device Information**, **Battery**, **NUS** `7e400001…`, vendor **`3802`**, manufacturer data company id **`0xAA01`** (payload begins with BD_ADDR bytes).
+- **GATT read:** at least one DIS-style read returned ASCII **`LJ733_MB_V1.1`** (internal hardware / board string). **`V32399`** in the app UI and **`LJ733_MB_V1.1`** over GATT are **different identifiers** (UI / product vs BLE-exposed revision string).
+- **Vendor UART (`dg01-ble query`):** `getSetInfoByKey` (**cmd 26**) with key **20** returns a notify whose payload includes the **public address** `0a 93 79 0c dd 20`. Other keys (`1`, `10`, `12`, …) return **short `0xDC` frames**, **assembled `0xCD`**, or **sport / noise-shaped** packets — the **`query`** command only waits for the **first** notify per write; full multi-part **`0xCD`** replies may need the same **reassembly** logic as `upload-dial` (`CdNotifyAssembler`).
+
+```bash
+cd dg01-ble && cargo run --release -- query --addr 0A:93:79:0C:DD:20 \
+  --info-keys 1,10,12,15,16,17,20 --dial-keys 1,2 --disconnect
+```
+
 ## Hypotheses for image / video upload
 
 1. **Chunked writes** to one of: **`4A02`**, **`AA01`**, **`AE01`**, and/or **NUS `7e400002` / `7e400003`** (with notifications on the paired notify characteristics).
@@ -61,7 +107,7 @@ Full UUIDs use the Bluetooth base UUID `0000xxxx-0000-1000-8000-00805f9b34fb` un
 | Item | Purpose |
 |------|--------|
 | `ebadge_inspect.py` | Scan / detect `DG01`, optional GATT dump via Bleak (`--pair`, `--connect-timeout`, etc.) |
-| `dg01-ble/` | Rust CLI on **Linux BlueZ** (`bluer`): `find`, **`sync-time`**, **`query`** (`getSetInfoByKey` cmd **26** / dial read cmd **32** + NUS notify), `scan` — same DBus path as **`bluetoothctl`**. Build: `cd dg01-ble && cargo build --release` |
+| `dg01-ble/` | Rust CLI on **Linux BlueZ** (`bluer`): `find`, **`sync-time`**, **`query`**, **`upload-dial`** (cmd **31** watchface transfer: start / chunked file / finish — see `WatchThemeTools`), `scan` — same DBus path as **`bluetoothctl`**. Build: `cd dg01-ble && cargo build --release` |
 | `capture_le_passive.sh` | `btmon` + scan (needs `sudo`); HCI to `.btsnoop` for Wireshark |
 | `gatt_dump_dg01.txt` | One successful **`bluetoothctl`** `list-attributes` capture |
 
@@ -77,6 +123,8 @@ Nothing on the public web documents **DG01**, **`V32399`**, or **SuperBand**-spe
 | **Similar LCD badge hardware** | Alibaba listings for **~1.85" 360×360 IPS** “electronic badge”, e.g. **JL7014F5**, BLE **5.4**, Dongguan suppliers ([example product page](https://www.alibaba.com/product-detail/1-85-inch-Electronic-Display-Electronic_1601606442776.html)) | **Hardware class** match (screen size, BLE); **no** open protocol; chip **JL701x** is common in Chinese wearables — **does not prove** our device uses JL7014. |
 | **LED matrix badges** | `FEE0`/`FEE1` and AES examples ([Stack Overflow / Bleak](https://stackoverflow.com/questions/77984711/problem-sending-data-to-a-led-name-badge-through-ble-using-bleak), [ble-led-badge](https://github.com/timhodson/ble-led-badge)) | **Different product class** (scroll text / LED), not IPS LCD — **do not** reuse packets. |
 | **Reverse-engineering methodology** | Android **HCI snoop** + Wireshark; APK decompilation ([general BLE RE guide](https://reverse-engineering-ble-devices.readthedocs.io/en/latest/)) | How to get **ground truth** when the official app sends an image. |
+| **FitPro-class tear-down (Y68 / LT716)** | [Hacking a FocusFit Pro-Y68](https://xor.co.za/post/2022-11-30-hacking-smartwatch/) — DIS + battery over GATT, NUS commands, jadx; **different** SoC than DG01 | **Methodology** and **GATT read** pattern; not a DG01 protocol spec. |
+| **Gadgetbridge FitPro** | [FitPro protocol](https://gadgetbridge.org/internals/specifics/fitpro-protocol/) — `0xCD` framing; watchface often **not** implemented | Confirms OEM framing family; **no** full dial upload spec. |
 
 **Bluetooth SIG company ID `0xAA01`:** resolve the current assignee in the official [Company Identifiers](https://www.bluetooth.com/specifications/assigned-numbers/company-Identifiers/) list — third-party summaries often confuse similar hex values.
 
@@ -135,6 +183,12 @@ return new byte[]{ (byte)0xCD, 0, 6, command, 1, subKey, 0, 1, valueByte };
 
 **Repo helper:** `superband_find_device.py` connects and sends this payload (see `--help`).
 
+**Linux (`dg01-ble`):** same bytes via `find` (default: write to NUS TX `7e400002…`):
+
+```bash
+cd dg01-ble && cargo run --release -- find --addr 0A:93:79:0C:DD:20
+```
+
 ### Watchface / “dial” upload (command **31**)
 
 Defined in `Profile.PBSmartBandCommandId` / `SendData` / `WatchThemeTools`:
@@ -150,6 +204,8 @@ Defined in `Profile.PBSmartBandCommandId` / `SendData` / `WatchThemeTools`:
 - `getDialUpdateFileValue` payload = **`[seq_u16_be]`** + **chunk** + **u16 checksum** = sum of **(seq bytes + chunk bytes)** as unsigned 16-bit (see `calculateCheckcode`).
 
 Responses are correlated by sequence in `WatchThemeTools.response` (expects status codes `1000+n` for ACK of chunk `n`, etc.).
+
+**Linux try:** `cargo run --release -- upload-dial --addr <MAC> --solid` sends a solid RGB565 test pattern (default 360×360 red). Use `--file watchface.bin` for a raw blob, or `--file export.bmp --strip-bmp` to mimic APK `getNotHeaderBmp`. If the device uses 120-byte chunks, add `--chunk 120`. Image bytes must match what the firmware expects (often RGB565 from server-exported “dial” assets — a plain PNG will not work without conversion).
 
 ### Other commands worth tracing
 
