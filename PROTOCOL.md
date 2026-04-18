@@ -198,7 +198,7 @@ Defined in `Profile.PBSmartBandCommandId` / `SendData` / `WatchThemeTools`:
 |---------|----------------|--------|
 | `2` | start | `getDialUpdateStartValue` — begins transfer (font slot, custom flag, RGB, optional replace position) |
 | `1` | file | `getDialUpdateFileValue` — **chunked file data** |
-| `3` | finish | `getDialUpdateFinishValue` — 8-byte trailer: **LE 32-bit file length** + **LE 32-bit sum of all file bytes** (see `calculateFinishCheckcode` in `WatchThemeTools`) |
+| `3` | finish | `getDialUpdateFinishValue` — 8-byte trailer: **BE 32-bit file length** + **BE 32-bit sum of all file bytes** (`NumberUtils.intToBytes` in `calculateFinishCheckcode`; same as `dg01-ble` `dial_finish_payload`) |
 
 **Chunking:** `WatchThemeTools` sends **200 bytes** per chunk by default, or **120** if the device config bit says so (`WRITE_MAX_SIZE`). Each **file** frame is:
 

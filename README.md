@@ -6,7 +6,7 @@ BLE tooling and protocol / reverse-engineering notes for **DG01**-class LCD pins
 
 | Path | Purpose |
 |------|---------|
-| `dg01-ble/` | Rust CLI on Linux (BlueZ via **bluer**): `scan`, `find`, `sync-time`, `query`, **`device-info`** (SIG GATT **0x180A** DIS + **0x180F** battery), **`battery-watch`** (Battery Level **0x2A19** NOTIFY when the level changes), **`dial-dims`** (cmd 32/2 — firmware watchface **width×height**), `upload-dial` (cmd 31; **`--use-device-dial-dims`** matches APK sizing) — see **[PROTOCOL.md](PROTOCOL.md)** |
+| `dg01-ble/` | Rust CLI on Linux (BlueZ via **bluer**): `scan`, `find`, `sync-time`, `query`, **`device-info`**, **`battery-watch`**, **`dial-dims`**, **`upload-dial`** — see **[PROTOCOL.md](PROTOCOL.md)**; APK ↔ tool parity notes: **[dg01-ble/APK_PARITY.md](dg01-ble/APK_PARITY.md)** |
 | `PROTOCOL.md` | GATT map, framing, command IDs from APK analysis and local captures |
 | `ebadge_inspect.py`, `superband_find_device.py` | Python helpers (Bleak path; flaky vs BlueZ in practice) |
 | `capture_le_passive.sh`, `apk-get` | Shell helpers |
