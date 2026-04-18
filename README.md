@@ -6,7 +6,7 @@ BLE tooling and protocol / reverse-engineering notes for **DG01**-class LCD pins
 
 | Path | Purpose |
 |------|---------|
-| `dg01-ble/` | Rust CLI on Linux (BlueZ via **bluer**): `scan`, `find`, `sync-time`, `query`, **`device-info`**, **`battery-watch`**, **`dial-dims`**, **`upload-dial`** — see **[PROTOCOL.md](PROTOCOL.md)**; APK ↔ tool parity notes: **[dg01-ble/APK_PARITY.md](dg01-ble/APK_PARITY.md)** |
+| `dg01-ble/` | Rust CLI on Linux (BlueZ via **bluer**): `scan`, `find`, `sync-time`, `query`, **`device-info`**, **`battery-watch`**, **`dial-dims`**, **`dial-status`**, **`file-send-status`**, **`upload-dial`** — see **[PROTOCOL.md](PROTOCOL.md)**; APK ↔ tool parity notes: **[dg01-ble/APK_PARITY.md](dg01-ble/APK_PARITY.md)** |
 | `PROTOCOL.md` | GATT map, framing, command IDs from APK analysis and local captures |
 | `ebadge_inspect.py`, `superband_find_device.py` | Python helpers (Bleak path; flaky vs BlueZ in practice) |
 | `capture_le_passive.sh`, `apk-get` | Shell helpers |
@@ -81,6 +81,28 @@ cd dg01-ble && cargo run --release -- dial-dims --addr 0A:93:79:0C:DD:20 --disco
 There is **no** CLI command to list the phone-style **catalogue of installed watch faces** — that UI is driven by the app’s **HTTP API**; see **[PROTOCOL.md](PROTOCOL.md)** (watchface section).
 
 **Uploading splash on the badge:** the stock app waits for a **start ACK** (status **1000**) after **cmd 31/2** before sending chunks; **`--skip-start-ack`** skips that wait and may mean the device **never shows** the uploading screen even if data still transfers — see **[PROTOCOL.md](PROTOCOL.md)**.
+
+## APK-style status reads and upload tuning (`dial-status`, `file-send-status`, `upload-dial`)
+
+FitPro uses periodic **`readStatus()`**-style UART polls during long transfers. **`dg01-ble`** exposes the same **no-payload** frames for debugging stalls:
+
+| Subcommand | Frame (APK) | Use |
+|------------|-------------|-----|
+| **`dial-status`** | **`getNoValueProtocol(32, 1)`** — **`getDialUpdateStatus()`** | Dial (**cmd 31**) path |
+| **`file-send-status`** | **`getNoValueProtocol(35, 1)`** — **`getFileSendStatus()`** | File (**cmd 34**) path |
+
+```bash
+cd dg01-ble && cargo run --release -- dial-status --addr 0A:93:79:0C:DD:20 --apk-uart --disconnect
+cd dg01-ble && cargo run --release -- file-send-status --addr 0A:93:79:0C:DD:20 --apk-uart --disconnect
+```
+
+**`upload-dial`** defaults are tuned toward phone captures: **`--gatt-fragment-gap-ms 3`**, **`--step-timeout-ms 10000`**. **`--apk-parity`** enforces at least **10 s** step timeout and **3 ms** fragment gap. Other useful flags:
+
+- **`--min-battery-percent N`** — read **BAS** (same service as **`device-info`**) before sending payload; abort if level is below **N** (**0** = off).
+- **`--chunk-write-retries`** — optional resend of the same chunk after an ACK timeout (default **1** extra attempt).
+- **`--dial-read-status-after-start`** / **`--file-read-status-after-start`** — after start ACK **1000**, send **cmd 32/1** or **cmd 35/1** and drain notifies (matches APK status-poll style).
+
+Full behaviour and backlog: **[dg01-ble/APK_PARITY.md](dg01-ble/APK_PARITY.md)**.
 
 ## License
 
