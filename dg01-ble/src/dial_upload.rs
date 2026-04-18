@@ -96,6 +96,52 @@ pub fn dial_start(
     get_protocol(CMD_DIAL_TRANSFER, SUB_DIAL_START, &pl)
 }
 
+/// **17-byte** cmd 31/2 start payload seen in `logs/upload-2.log.pcapng` (stock app successful upload).
+///
+/// Layout: `font`, `custom`, **`mid4`** (OEM / layout — capture default `15 a2 00 08`), **`r,g,b`**,
+/// **`file_len`** big-endian u32, then **four zero** bytes (reserved).
+pub fn dial_start_extended(
+    font_position: u8,
+    custom: u8,
+    mid4: [u8; 4],
+    r: u8,
+    g: u8,
+    b: u8,
+    file_len: u32,
+) -> Vec<u8> {
+    let mut pl = Vec::with_capacity(17);
+    pl.push(font_position);
+    pl.push(custom);
+    pl.extend_from_slice(&mid4);
+    pl.extend_from_slice(&[r, g, b]);
+    pl.extend_from_slice(&file_len.to_be_bytes());
+    pl.extend_from_slice(&[0u8; 4]);
+    debug_assert_eq!(pl.len(), 17);
+    get_protocol(CMD_DIAL_TRANSFER, SUB_DIAL_START, &pl)
+}
+
+/// `mid4` from screen dimensions as **big-endian** `width` then `height` (u16 each) — try when capture OEM bytes are wrong for your asset.
+pub fn dial_start_mid4_dims_be(width: u16, height: u16) -> [u8; 4] {
+    let mut m = [0u8; 4];
+    m[0..2].copy_from_slice(&width.to_be_bytes());
+    m[2..4].copy_from_slice(&height.to_be_bytes());
+    m
+}
+
+/// Eight hex digits → four bytes (e.g. `15a20008` for capture default).
+pub fn parse_mid4_hex(s: &str) -> anyhow::Result<[u8; 4]> {
+    let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    if s.len() != 8 {
+        anyhow::bail!("--dial-start-mid4 must be exactly 8 hex digits, got {} chars", s.len());
+    }
+    let mut out = [0u8; 4];
+    for (i, chunk) in out.iter_mut().enumerate() {
+        *chunk = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
+            .map_err(|_| anyhow::anyhow!("invalid hex in --dial-start-mid4"))?;
+    }
+    Ok(out)
+}
+
 /// Shared chunk layout: `getDialUpdateFileValue` / `getFileDataValue` (cmd 31 or 34, sub 1).
 pub fn uart_file_chunk(cmd: u8, seq: u16, chunk: &[u8]) -> Vec<u8> {
     let mut body = Vec::with_capacity(2 + chunk.len() + 2);
@@ -226,6 +272,33 @@ pub fn parse_cd_notify_status(packet: &[u8]) -> Option<i32> {
 /// The APK hex-decodes the payload **after** the 8-byte `0xCD` header; first fields are:
 /// `screenType`, `grade`, then **big-endian** `width`, `height` (`NumberUtils.bytesToShort` on each pair).
 pub fn parse_dial_clock_info_cd(packet: &[u8]) -> Option<(u8, u8, u16, u16)> {
+    parse_dial_clock_info_full(packet).map(|d| (d.screen_type, d.grade, d.width, d.height))
+}
+
+/// Parsed **`parseDialInfo`** payload (cmd **32** sub **2**), including **`config`** when present.
+///
+/// `config` is used by the APK (`NumberUtils.intToBinary(config)[1] == 1` → **120**-byte dial chunks else **200**).
+#[derive(Clone, Debug)]
+pub struct DialClockInfoParsed {
+    pub screen_type: u8,
+    pub grade: u8,
+    pub width: u16,
+    pub height: u16,
+    /// Raw **`config`** octet from the device (`BaseReceiveData.parseDialInfo`), if the payload is long enough.
+    pub config: Option<u8>,
+}
+
+/// APK `WatchThemeTools.WRITE_MAX_SIZE`: **120** if **`(config >> 1) & 1 == 1`**, else **200**.
+pub fn apk_dial_chunk_size_from_config_byte(config: u8) -> usize {
+    if ((config >> 1) & 1) == 1 {
+        120
+    } else {
+        200
+    }
+}
+
+/// Full **`parseDialInfo`** walk (`BaseReceiveData.parseDialInfo`) on the **payload** after the **`0xCD`** header.
+pub fn parse_dial_clock_info_full(packet: &[u8]) -> Option<DialClockInfoParsed> {
     if packet.first().copied()? != 0xCD {
         return None;
     }
@@ -243,11 +316,38 @@ pub fn parse_dial_clock_info_cd(packet: &[u8]) -> Option<(u8, u8, u16, u16)> {
         return None;
     }
     let p = &packet[8..8 + plen];
-    let screen = p[0];
+    let screen_type = p[0];
     let grade = p[1];
     let width = u16::from_be_bytes([p[2], p[3]]);
     let height = u16::from_be_bytes([p[4], p[5]]);
-    Some((screen, grade, width, height))
+    let mut config = None;
+    if p.len() > 6 {
+        let lm = p[6] as usize;
+        if p.len() > 7 + lm {
+            let main_len = p[7 + lm] as usize;
+            if p.len() >= 8 + lm + main_len {
+                let i5 = 8 + lm + main_len;
+                if p.len() > i5 {
+                    config = Some(p[i5]);
+                }
+            }
+        }
+    }
+    Some(DialClockInfoParsed {
+        screen_type,
+        grade,
+        width,
+        height,
+        config,
+    })
+}
+
+/// Some firmware ACKs dial **start** with **`0xCD`** cmd **0x15** sub **0x0c** (seen after `--preflight-upload2`), not cmd **31** status **1000**.
+pub fn is_dial_start_banner_cd(packet: &[u8]) -> bool {
+    packet.first().copied() == Some(0xCD)
+        && packet.len() >= 8
+        && packet.get(3).copied() == Some(0x15)
+        && packet.get(5).copied() == Some(0x0c)
 }
 
 /// Match `WatchThemeTools.getNotHeaderBmp`: keep last `width * height * 2` bytes (RGB565 body).
@@ -285,6 +385,24 @@ mod tests {
         assert_eq!(f[3], 31);
         assert_eq!(f[5], 2);
         assert_eq!(&f[8..], &[0, 0, 255, 255, 255]);
+    }
+
+    #[test]
+    fn extended_start_matches_upload2_capture() {
+        let mid = [0x15, 0xa2, 0x00, 0x08];
+        let f = dial_start_extended(0, 0, mid, 255, 255, 255, 0x0001_fe94);
+        assert_eq!(
+            f,
+            &[
+                0xcd, 0x00, 0x16, 0x1f, 0x01, 0x02, 0x00, 0x11, 0x00, 0x00, 0x15, 0xa2, 0x00, 0x08,
+                0xff, 0xff, 0xff, 0x00, 0x01, 0xfe, 0x94, 0x00, 0x00, 0x00, 0x00
+            ][..]
+        );
+    }
+
+    #[test]
+    fn parse_mid4_hex_ok() {
+        assert_eq!(parse_mid4_hex("15a20008").unwrap(), [0x15, 0xa2, 0x00, 0x08]);
     }
 
     #[test]
@@ -327,6 +445,29 @@ mod tests {
         pkt.extend_from_slice(&[0u8, 0, 0x01, 0x68, 0x01, 0x68]);
         let r = parse_dial_clock_info_cd(&pkt).expect("parse");
         assert_eq!(r, (0, 0, 360, 360));
+    }
+
+    #[test]
+    fn parse_dial_clock_info_full_config_and_chunk_hint() {
+        // Real-style payload: mch len 3 "K66", main len 5 "LJ733", then more fields; config at i5 = 0x07.
+        // plen = 32 at [6,7]; frame = 8+32 = 40 bytes → len at [1,2] = 40−3 = 37 = 0x0025.
+        let mut pkt = vec![0xCDu8, 0x00, 0x25, 32, 1, 2, 0, 32];
+        pkt.extend_from_slice(&[
+            1, 0, 0x01, 0x68, 0x01, 0x68, 0x03, 0x4b, 0x36, 0x36, 0x05, 0x4c, 0x4a, 0x37, 0x33,
+            0x33, 0x07, 0x03, 0xff, 0xfe, 0x01, 0x05, 0x4a, 0x51, 0x30, 0x30, 0x31, 0x00, 0x00,
+            0x09, 0x61, 0xa8,
+        ]);
+        let d = parse_dial_clock_info_full(&pkt).expect("full parse");
+        assert_eq!(d.width, 360);
+        assert_eq!(d.height, 360);
+        assert_eq!(d.config, Some(0x07));
+        assert_eq!(apk_dial_chunk_size_from_config_byte(0x07), 120);
+    }
+
+    #[test]
+    fn dial_start_banner_cd_matches_upload2_preflight() {
+        let pkt = [0xCDu8, 0x00, 0x1b, 0x15, 1, 0x0c, 0, 4, 0, 0, 0, 0];
+        assert!(is_dial_start_banner_cd(&pkt));
     }
 
     #[test]

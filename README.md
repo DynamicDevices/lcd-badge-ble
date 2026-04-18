@@ -6,7 +6,7 @@ BLE tooling and protocol / reverse-engineering notes for **DG01**-class LCD pins
 
 | Path | Purpose |
 |------|---------|
-| `dg01-ble/` | Rust CLI on Linux (BlueZ via **bluer**): `scan`, `find`, `sync-time`, `query`, **`device-info`** (SIG GATT **0x180A** DIS + **0x180F** battery, scanner-style decode), **`dial-dims`** (cmd 32/2 — firmware watchface **width×height**), `upload-dial` (cmd 31; **`--use-device-dial-dims`** matches APK sizing) — see **[PROTOCOL.md](PROTOCOL.md)** |
+| `dg01-ble/` | Rust CLI on Linux (BlueZ via **bluer**): `scan`, `find`, `sync-time`, `query`, **`device-info`** (SIG GATT **0x180A** DIS + **0x180F** battery), **`battery-watch`** (Battery Level **0x2A19** NOTIFY when the level changes), **`dial-dims`** (cmd 32/2 — firmware watchface **width×height**), `upload-dial` (cmd 31; **`--use-device-dial-dims`** matches APK sizing) — see **[PROTOCOL.md](PROTOCOL.md)** |
 | `PROTOCOL.md` | GATT map, framing, command IDs from APK analysis and local captures |
 | `ebadge_inspect.py`, `superband_find_device.py` | Python helpers (Bleak path; flaky vs BlueZ in practice) |
 | `capture_le_passive.sh`, `apk-get` | Shell helpers |
@@ -48,7 +48,7 @@ Quick BlueZ check (no `Connect`): `cargo run --release -- is-connected --addr 0A
 Subcommand **`device-info`** connects and reads:
 
 - **Device Information (0x180A):** manufacturer, model, serial, firmware, hardware, software, system ID, IEEE regulatory, **PnP ID** — decoded like nRF Connect (UTF-8 strings; PnP fields broken out).
-- **Battery Service (0x180F):** **Battery Level (0x2A19)** — SIG defines one octet 0–100 as %; some OEMs (including DG01 here) return **extra octets**; the tool shows **first octet as %** when ≤100 and prints trailing bytes as hex.
+- **Battery Service (0x180F):** **Battery Level (0x2A19)** — SIG defines one octet 0–100 as %; some OEMs return **extra octets**; the decoded **Value** uses the **first octet** only; **`device-info`** still prints a **Raw** hex line for the full read.
 
 If **0x180F** is absent, a one-line notice is printed; **0x180A** is still required for the command to succeed.
 
@@ -58,6 +58,17 @@ cd dg01-ble && cargo run --release -- device-info --addr 0A:93:79:0C:DD:20 --dis
 ```
 
 Vendor UART **`query`** (cmd 26) is separate from SIG GATT — use both if you want APK-style keys **and** standard DIS/battery reads.
+
+## Battery level while charging (`battery-watch`)
+
+Subcommand **`battery-watch`** connects, subscribes to **Battery Level (0x2A19) NOTIFY**, and prints a line **only when the device pushes a new value** (no periodic GATT reads). If NOTIFY is missing or subscribe fails, it falls back to polling with **`--interval-secs`** (default **10**).
+
+Use **`--duration-secs N`** to stop after *N* seconds, or **`0`** to run until Ctrl+C. **`--disconnect`** ends the BLE session when the command exits so the adapter does not leave the link up (same idea as **`device-info --disconnect`**).
+
+```bash
+cd dg01-ble && cargo run --release -- battery-watch --addr 0A:93:79:0C:DD:20 --duration-secs 300 --disconnect
+cd dg01-ble && cargo run --release -- battery-watch --addr 0A:93:79:0C:DD:20 --duration-secs 0 --disconnect
+```
 
 ## Dial dimensions (`dial-dims`)
 

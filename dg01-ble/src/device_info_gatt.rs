@@ -38,23 +38,17 @@ fn bas_characteristic_title(short: u16) -> &'static str {
 }
 
 /// **Battery Level** (`0x2A19`) — SIG is **one** octet 0–100 ([Battery Service](https://www.bluetooth.com/specifications/specs/battery-service/)).
-/// Many OEMs append extra octets; we treat the first octet as % when ≤100 and show the rest as raw.
-fn decode_battery_level(raw: &[u8]) -> String {
+/// Extra octets are ignored; the first octet is treated as percentage when ≤100.
+pub fn decode_battery_level(raw: &[u8]) -> String {
     if raw.is_empty() {
         return "(empty read)".to_string();
     }
     let first = raw[0];
-    let mut out = if first <= 100 {
+    if first <= 100 {
         format!("{first}%")
     } else {
         format!("first octet 0x{first:02x} (>100 — reserved per SIG or vendor encoding)")
-    };
-    if raw.len() > 1 {
-        out.push_str(" — trailing ");
-        out.push_str(&hex_bytes(&raw[1..]));
-        out.push_str(" (often padding / OEM)");
     }
-    out
 }
 
 fn u16_from_uuid(u: &Uuid) -> Option<u16> {
@@ -283,10 +277,6 @@ mod tests {
         assert_eq!(decode_battery_level(&[100]), "100%");
         assert_eq!(decode_battery_level(&[64]), "64%");
         assert_eq!(decode_battery_level(&[]), "(empty read)");
-        assert!(
-            decode_battery_level(&[0x1a, 0x00])
-                .contains("26%")
-                && decode_battery_level(&[0x1a, 0x00]).contains("00")
-        );
+        assert_eq!(decode_battery_level(&[0x1a, 0x00]), "26%");
     }
 }

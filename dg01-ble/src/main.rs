@@ -16,6 +16,7 @@
 //! cd dg01-ble && cargo run --release -- scan --seconds 15
 //! cd dg01-ble && cargo run --release -- is-connected --addr 0A:93:79:0C:DD:20
 //! cd dg01-ble && cargo run --release -- device-info --addr 0A:93:79:0C:DD:20   # DIS + Battery (0x180A, 0x180F)
+//! cd dg01-ble && cargo run --release -- battery-watch --addr 0A:93:79:0C:DD:20   # BAS NOTIFY when level changes
 //! cd dg01-ble && cargo run --release -- connect --addr 0A:93:79:0C:DD:20
 //! cd dg01-ble && cargo run --release -- disconnect --addr 0A:93:79:0C:DD:20
 //! ```
@@ -31,11 +32,13 @@ use bluer::{Adapter, AdapterEvent, Address, Device, DiscoveryFilter, DiscoveryTr
 use clap::{Parser, Subcommand};
 use futures::{pin_mut, StreamExt};
 use dial_upload::{
-    decode_dc_notify_line, dial_device_control_response, dial_file_frame, dial_finish_payload, dial_start,
-    file34_file_frame, file34_finish_frame, file34_start, parse_cd_notify_status, parse_dc_short,
-    parse_dial_clock_info_cd, parse_dial_watch_ack_status, solid_rgb565_buffer, strip_bmp_rgb565_tail,
-    CdNotifyAssembler, CMD_DIAL_TRANSFER, CMD_FILE_UART, SUB_DIAL_FINISH, SUB_DIAL_NOTIFY_CLOCK_INFO,
-    SUB_DIAL_START,
+    apk_dial_chunk_size_from_config_byte, decode_dc_notify_line, dial_device_control_response,
+    dial_file_frame, dial_finish_payload, dial_start, dial_start_extended, dial_start_mid4_dims_be,
+    file34_file_frame, file34_finish_frame, file34_start, is_dial_start_banner_cd,
+    parse_cd_notify_status, parse_dc_short, parse_dial_clock_info_cd, parse_mid4_hex,
+    parse_dial_clock_info_full, parse_dial_watch_ack_status, solid_rgb565_buffer, strip_bmp_rgb565_tail,
+    CdNotifyAssembler, DialClockInfoParsed, CMD_DIAL_TRANSFER, CMD_FILE_UART, SUB_DIAL_FINISH,
+    SUB_DIAL_NOTIFY_CLOCK_INFO, SUB_DIAL_START,
 };
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -70,6 +73,22 @@ const KEY_ENTER_OTA_MODE: u8 = 25;
 /// Short `0xDC` writes from `upload-2.log.pcapng` before dial bulk (exact bytes).
 const PREFLIGHT_UPLOAD2_DC1: [u8; 8] = [0xDC, 0x00, 0x05, 0x15, 0x0C, 0x00, 0x1E, 0x01];
 const PREFLIGHT_UPLOAD2_DC2: [u8; 8] = [0xDC, 0x00, 0x05, 0x20, 0x02, 0x00, 0x28, 0x01];
+/// Frame **3434** — immediately before `SendData.getWeatherInfoValue` (cmd **18**/**32**) burst.
+const PREFLIGHT_UPLOAD2_DC_BEFORE_WEATHER: [u8; 8] =
+    [0xDC, 0x00, 0x05, 0x20, 0x03, 0x00, 0x12, 0x01];
+/// Three **ATT Write Request** segments from `upload-2` frames **3454–3464** (`getWeatherInfoValue` + city **Lithuania** + tail). Replayed in order (MTU-sized fragments).
+const PREFLIGHT_UPLOAD2_WEATHER_FRAG1: [u8; 20] = [
+    0xCD, 0x00, 0x4D, 0x12, 0x01, 0x20, 0x00, 0x48, 0x0A, 0x4C, 0x69, 0x74, 0x68, 0x65, 0x72, 0x6C,
+    0x61, 0x6E, 0x64, 0x03,
+];
+const PREFLIGHT_UPLOAD2_WEATHER_FRAG2: [u8; 20] = [
+    0x01, 0x35, 0x26, 0x40, 0x05, 0x0A, 0x0F, 0x03, 0x03, 0x00, 0x04, 0x57, 0x16, 0x13, 0x11, 0x00,
+    0x75, 0x01, 0xBC, 0x04,
+];
+const PREFLIGHT_UPLOAD2_WEATHER_FRAG3: [u8; 20] = [
+    0x01, 0x35, 0x26, 0x42, 0x07, 0x06, 0x0C, 0x03, 0x03, 0x00, 0x04, 0x4E, 0x18, 0x1C, 0x0D, 0x00,
+    0x71, 0x01, 0xC0, 0x04,
+];
 
 /// BlueZ `connect()` / GATT discovery can block indefinitely; fail fast with a clear error.
 const BLE_CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
@@ -230,6 +249,22 @@ enum Command {
         #[arg(long)]
         disconnect: bool,
     },
+    /// **Battery Level (0x2A19)**: subscribe to **NOTIFY** and print when the device pushes an update; if NOTIFY is unavailable, poll with **READ** on `--interval-secs`.
+    BatteryWatch {
+        #[arg(long)]
+        addr: String,
+
+        /// If **Battery Level** has no NOTIFY: poll with a GATT read this often (seconds). Ignored when NOTIFY works.
+        #[arg(long, default_value_t = 10)]
+        interval_secs: u64,
+
+        /// Stop after this many seconds (`0` = run until Ctrl+C).
+        #[arg(long, default_value_t = 0)]
+        duration_secs: u64,
+
+        #[arg(long)]
+        disconnect: bool,
+    },
     /// Print `org.bluez.Device1` **Connected** / **ServicesResolved** (no `Connect`). Exit **1** if **Connected** is false.
     IsConnected {
         #[arg(long)]
@@ -343,6 +378,20 @@ enum Command {
         #[arg(long)]
         replace_pic_pos: Option<u8>,
 
+        /// Use the **17-byte** dial start payload from Wireshark `upload-2` (mid4 + RGB + BE file length + 4 zero),
+        /// instead of the minimal 5-byte `WatchThemeTools` start. Incompatible with `--replace-pic-pos` and `file34`.
+        #[arg(long)]
+        extended_dial_start: bool,
+
+        /// Four payload bytes between font/custom and RGB in `--extended-dial-start` (8 hex digits). Default: **`15a20008`**
+        /// (value from `logs/upload-2.log.pcapng`). Ignored if **`--dial-start-mid-from-dims`** is set.
+        #[arg(long, default_value = "15a20008")]
+        dial_start_mid4: String,
+
+        /// Set extended start **`mid4`** from **`width`** and **`height`** as two big-endian u16 (same order as dial info).
+        #[arg(long)]
+        dial_start_mid_from_dims: bool,
+
         #[arg(long, default_value_t = 8000)]
         step_timeout_ms: u64,
 
@@ -365,8 +414,10 @@ enum Command {
         #[arg(long)]
         preflight: bool,
 
-        /// Use the longer init sequence seen in `logs/upload-2.log.pcapng` (time → language → realtime
-        /// step → dial 32/2 → two `0xDC` frames → settings 18/10 → repeated dial 32/3). Implies `--preflight`.
+        /// Use the init sequence from `logs/upload-2.log.pcapng` (time → language → realtime step → dial
+        /// 32/2 → two `0xDC` frames → settings 18/10 → repeated dial 32/3 → **third** `0xDC` → **weather**
+        /// cmd **18**/**32** in three ATT segments — same order as successful iPhone capture; **no** cmd32/1
+        /// read before dial start). Implies `--preflight`.
         #[arg(long)]
         preflight_upload2: bool,
 
@@ -405,6 +456,33 @@ enum Command {
         /// device accepts writes but does not emit per-chunk notifications on this central (see capture).
         #[arg(long)]
         blind_chunks: bool,
+
+        /// Extra APK-style options (same defaults apply without this; kept for explicit “all parity” runs).
+        #[arg(long)]
+        apk_parity: bool,
+
+        /// Bytes per **GATT** write segment (**FitPro `CommandPool`** default **20**). Use **`0`** for one write
+        /// per protocol frame (faster debug, not APK-like).
+        #[arg(long)]
+        gatt_fragment_bytes: Option<usize>,
+
+        /// Milliseconds between **GATT** fragments (**~100** ms in the APK pool). Ignored when fragment size
+        /// is **0**.
+        #[arg(long, default_value_t = 100)]
+        gatt_fragment_gap_ms: u64,
+
+        /// Only accept cmd **31**/status **1000** for dial start (omit this; APK also treats **0x15**/**0x0c** as start banner).
+        #[arg(long)]
+        strict_start_ack: bool,
+
+        /// Set **`--chunk`** from dial **`config`** (**120** vs **200**, `WatchThemeTools.startFile`). On by
+        /// default whenever **`--use-device-dial-dims`** supplies **`config`**; **`--manual-chunk`** skips.
+        #[arg(long)]
+        apk_auto_chunk: bool,
+
+        /// Keep **`--chunk`** as given (do not apply **`config`** 120/200 rule).
+        #[arg(long)]
+        manual_chunk: bool,
 
         /// Extra milliseconds to sleep after each chunk when `--blind-chunks` is set (in addition to the
         /// built-in 15 ms). Helps long 360×360 uploads when the link drops mid-transfer (`Not connected`).
@@ -543,6 +621,21 @@ async fn main() -> anyhow::Result<()> {
         Command::DeviceInfo { addr, disconnect } => {
             cmd_device_info(&adapter, &addr, disconnect).await?;
         }
+        Command::BatteryWatch {
+            addr,
+            interval_secs,
+            duration_secs,
+            disconnect,
+        } => {
+            cmd_battery_watch(
+                &adapter,
+                &addr,
+                interval_secs,
+                duration_secs,
+                disconnect,
+            )
+            .await?;
+        }
         Command::Scan {
             seconds,
             name_contains,
@@ -601,6 +694,9 @@ async fn main() -> anyhow::Result<()> {
             rgb_g,
             rgb_b,
             replace_pic_pos,
+            extended_dial_start,
+            dial_start_mid4,
+            dial_start_mid_from_dims,
             step_timeout_ms,
             disconnect,
             reconnect,
@@ -612,6 +708,12 @@ async fn main() -> anyhow::Result<()> {
             skip_finish_ack,
             loose_ack,
             blind_chunks,
+            apk_parity,
+            gatt_fragment_bytes,
+            gatt_fragment_gap_ms,
+            strict_start_ack,
+            apk_auto_chunk,
+            manual_chunk,
             chunk_gap_ms,
             dial_start_probe,
             preflight_cmd26_keys,
@@ -623,6 +725,13 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 (write_uuid, notify_uuid)
             };
+            // FitPro: CommandPool uses 20-byte GATT segments; omit flag → 20. Pass --gatt-fragment-bytes 0 for MTU.
+            let gatt_fragment = gatt_fragment_bytes.unwrap_or(20);
+            // FitPro: accept cmd 0x15/0x0c start banner unless user forces strict cmd31-only ACK.
+            let apk_loose_start = !strict_start_ack;
+            // WatchThemeTools: WRITE_MAX_SIZE 120 vs 200 from dial config — apply when using device dial info.
+            let apply_chunk_from_dial_config =
+                !manual_chunk && (apk_auto_chunk || apk_parity || use_device_dial_dims);
             cmd_upload_dial(
                 &adapter,
                 &addr,
@@ -642,6 +751,9 @@ async fn main() -> anyhow::Result<()> {
                 rgb_g,
                 rgb_b,
                 replace_pic_pos,
+                extended_dial_start,
+                dial_start_mid4,
+                dial_start_mid_from_dims,
                 step_timeout_ms,
                 disconnect,
                 reconnect,
@@ -658,6 +770,10 @@ async fn main() -> anyhow::Result<()> {
                 &preflight_cmd26_keys,
                 enter_ota_mode,
                 dial32_sub3_control,
+                gatt_fragment,
+                gatt_fragment_gap_ms,
+                apk_loose_start,
+                apply_chunk_from_dial_config,
             )
             .await?;
         }
@@ -1046,6 +1162,13 @@ async fn cmd_dial_dims(
                         println!("  grade:      {grade}");
                         println!("  width:      {w}");
                         println!("  height:     {h}");
+                        if let Some(full) = parse_dial_clock_info_full(&pkt) {
+                            if let Some(cfg) = full.config {
+                                println!("  config:     0x{cfg:02x} (APK chunk hint: {} bytes)", apk_dial_chunk_size_from_config_byte(cfg));
+                            } else {
+                                println!("  config:     (not present in payload)");
+                            }
+                        }
                         println!(
                             "  RGB565 payload size (width×height×2): {} bytes",
                             (w as u32) * (h as u32) * 2
@@ -1080,6 +1203,30 @@ fn parse_ack_packet(packet: &[u8], loose_ack: bool) -> Option<i32> {
     }
 }
 
+/// APK **CommandPool** sends long frames as **≤20**-byte GATT writes with **~100** ms between segments.
+async fn gatt_write_fragmented(
+    write_ch: &Characteristic,
+    frame: &[u8],
+    fragment: usize,
+    gap_ms: u64,
+) -> anyhow::Result<()> {
+    if fragment == 0 || frame.len() <= fragment {
+        write_ch.write(frame).await.context("gatt write")?;
+        return Ok(());
+    }
+    let n = (frame.len() + fragment - 1) / fragment;
+    for (i, chunk) in frame.chunks(fragment).enumerate() {
+        if i > 0 && gap_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(gap_ms)).await;
+        }
+        write_ch
+            .write(chunk)
+            .await
+            .with_context(|| format!("gatt fragment {}/{} ({} bytes)", i + 1, n, chunk.len()))?;
+    }
+    Ok(())
+}
+
 /// Wait until a complete `0xCD` packet parses to status `want` (`parseDialUpCode` int).
 async fn wait_notify_status<S>(
     stream: &mut S,
@@ -1088,6 +1235,7 @@ async fn wait_notify_status<S>(
     timeout: Duration,
     loose_ack: bool,
     file34: bool,
+    loose_start_banner: bool,
 ) -> anyhow::Result<()>
 where
     S: futures::Stream<Item = Vec<u8>> + Unpin,
@@ -1128,6 +1276,13 @@ where
             }
         }
         for pkt in asm.push(&data) {
+            if want == 1000 && loose_start_banner && is_dial_start_banner_cd(&pkt) {
+                println!(
+                    "  parsed dial start banner (0xCD cmd 0x15 sub 0x0c): {}",
+                    hex(&pkt)
+                );
+                return Ok(());
+            }
             if let Some(code) = parse_ack_packet(&pkt, loose_ack) {
                 println!(
                     "  parsed ACK status: {code} {} ({})",
@@ -1271,11 +1426,37 @@ where
         drain_notifies(stream, asm).await;
     }
 
-    println!("Preflight: cmd32/1 (dial status)…");
+    // Successful **iPhone** capture does **not** send `getNoValueProtocol(32,1)` here; it sends DC → weather
+    // (`SendData.getWeatherInfoValue`, cmd **18**/**32**) then dial start. Omitting cmd32/1 matches `upload-2`.
+    println!("Preflight: DC short #3 (upload-2 frame 3434, before weather burst)…");
     write_ch
-        .write(&get_no_value_protocol(CMD_DIAL_READ, 1))
+        .write(&PREFLIGHT_UPLOAD2_DC_BEFORE_WEATHER)
         .await
-        .context("preflight dial read 1")?;
+        .context("preflight DC #3 before weather")?;
+    tokio::time::sleep(Duration::from_millis(GAP_MS)).await;
+    drain_notifies(stream, asm).await;
+
+    println!("Preflight: weather cmd18/32 — fragment 1/3 (upload-2 frame 3454, start of getWeatherInfoValue)…");
+    write_ch
+        .write(&PREFLIGHT_UPLOAD2_WEATHER_FRAG1)
+        .await
+        .context("preflight weather frag 1")?;
+    tokio::time::sleep(Duration::from_millis(GAP_MS)).await;
+    drain_notifies(stream, asm).await;
+
+    println!("Preflight: weather — fragment 2/3 (upload-2 frame 3458)…");
+    write_ch
+        .write(&PREFLIGHT_UPLOAD2_WEATHER_FRAG2)
+        .await
+        .context("preflight weather frag 2")?;
+    tokio::time::sleep(Duration::from_millis(GAP_MS)).await;
+    drain_notifies(stream, asm).await;
+
+    println!("Preflight: weather — fragment 3/3 (upload-2 frame 3464)…");
+    write_ch
+        .write(&PREFLIGHT_UPLOAD2_WEATHER_FRAG3)
+        .await
+        .context("preflight weather frag 3")?;
     tokio::time::sleep(Duration::from_millis(GAP_MS)).await;
     drain_notifies(stream, asm).await;
 
@@ -1315,12 +1496,12 @@ where
     Ok(())
 }
 
-/// APK `SendData.getDialClockInfo` → `BaseReceiveData.parseDialInfo` (width/height in first 6 payload bytes).
-async fn fetch_dial_clock_dims<S>(
+/// APK `SendData.getDialClockInfo` → `BaseReceiveData.parseDialInfo` (incl. optional **`config`** for chunk size).
+async fn fetch_dial_clock_info<S>(
     write_ch: &Characteristic,
     stream: &mut S,
     asm: &mut CdNotifyAssembler,
-) -> anyhow::Result<(u16, u16)>
+) -> anyhow::Result<DialClockInfoParsed>
 where
     S: futures::Stream<Item = Vec<u8>> + Unpin,
 {
@@ -1337,14 +1518,24 @@ where
         match tokio::time::timeout(left.min(Duration::from_millis(400)), stream.next()).await {
             Ok(Some(data)) => {
                 for pkt in asm.push(&data) {
-                    if let Some((screen, grade, w, h)) = parse_dial_clock_info_cd(&pkt) {
+                    if let Some(info) = parse_dial_clock_info_full(&pkt) {
+                        let screen = info.screen_type;
+                        let grade = info.grade;
+                        let w = info.width;
+                        let h = info.height;
                         println!(
                             "  cmd32/2 dial info: screenType={screen} grade={grade} width={w} height={h}"
                         );
+                        if let Some(c) = info.config {
+                            println!(
+                                "  config=0x{c:02x} — APK dial chunk hint: {} bytes",
+                                apk_dial_chunk_size_from_config_byte(c)
+                            );
+                        }
                         if w == 0 || h == 0 {
                             bail!("device reported zero width or height in dial info");
                         }
-                        return Ok((w, h));
+                        return Ok(info);
                     }
                 }
             }
@@ -1370,13 +1561,16 @@ async fn cmd_upload_dial(
     mut height: u16,
     use_device_dial_dims: bool,
     solid_rgb565: u16,
-    chunk: usize,
+    mut chunk: usize,
     font_pos: u8,
     custom: bool,
     rgb_r: u8,
     rgb_g: u8,
     rgb_b: u8,
     replace_pic_pos: Option<u8>,
+    extended_dial_start: bool,
+    dial_start_mid4: String,
+    dial_start_mid_from_dims: bool,
     step_timeout_ms: u64,
     disconnect_after: bool,
     reconnect: bool,
@@ -1393,9 +1587,13 @@ async fn cmd_upload_dial(
     preflight_cmd26_keys: &[u8],
     enter_ota_mode: bool,
     dial32_sub3_control: Option<u8>,
+    gatt_fragment: usize,
+    gatt_fragment_gap_ms: u64,
+    apk_loose_start: bool,
+    apply_chunk_from_dial_config: bool,
 ) -> anyhow::Result<()> {
-    if !(1..=512).contains(&chunk) {
-        bail!("--chunk must be 1..=512");
+    if gatt_fragment > 512 {
+        bail!("--gatt-fragment-bytes must be <= 512");
     }
     let use_file34 = match protocol {
         "dial31" => false,
@@ -1407,6 +1605,14 @@ async fn cmd_upload_dial(
     }
     if use_device_dial_dims && dial_start_probe {
         bail!("--use-device-dial-dims is not compatible with --dial-start-probe");
+    }
+    if extended_dial_start {
+        if use_file34 {
+            bail!("--extended-dial-start is only for protocol dial31");
+        }
+        if replace_pic_pos.is_some() {
+            bail!("--extended-dial-start is incompatible with --replace-pic-pos");
+        }
     }
     let effective_preflight = preflight || preflight_upload2;
     if preflight_upload2 && !preflight {
@@ -1454,10 +1660,29 @@ async fn cmd_upload_dial(
     let mut asm = CdNotifyAssembler::default();
     let step = Duration::from_millis(step_timeout_ms);
 
+    let mut dial_info: Option<DialClockInfoParsed> = None;
     if use_device_dial_dims {
-        let (w, h) = fetch_dial_clock_dims(&write_ch, &mut notify_stream, &mut asm).await?;
-        width = w;
-        height = h;
+        let info = fetch_dial_clock_info(&write_ch, &mut notify_stream, &mut asm).await?;
+        width = info.width;
+        height = info.height;
+        dial_info = Some(info);
+    }
+    if apply_chunk_from_dial_config {
+        if let Some(ref info) = dial_info {
+            if let Some(c) = info.config {
+                chunk = apk_dial_chunk_size_from_config_byte(c);
+                println!(
+                    "dial chunk (APK WatchThemeTools): config 0x{c:02x} → {chunk} bytes (120 if bit1 of config else 200)"
+                );
+            } else {
+                println!("dial chunk: no config byte in dial info; keeping --chunk {chunk}");
+            }
+        } else {
+            println!("dial chunk: no cmd32/2 dial info; keeping --chunk {chunk} (use --use-device-dial-dims for auto)");
+        }
+    }
+    if !(1..=512).contains(&chunk) {
+        bail!("--chunk must be 1..=512");
     }
 
     let file_data: Vec<u8> = if dial_start_probe {
@@ -1478,13 +1703,18 @@ async fn cmd_upload_dial(
     };
 
     println!(
-        "protocol={} size={}×{} payload={} bytes chunk={} replace_pic_pos={:?} preflight={} preflight_upload2={} cmd26_keys={:?} enter_ota={} dial32_sub3={:?} skip_start_ack={} skip_finish_ack={} loose_ack={} blind_chunks={} chunk_gap_ms={} — first 16: {}",
+        "protocol={} size={}×{} payload={} bytes chunk={} gatt_frag={} gatt_gap_ms={} apk_loose_start={} replace_pic_pos={:?} extended_start={} mid_from_dims={} preflight={} preflight_upload2={} cmd26_keys={:?} enter_ota={} dial32_sub3={:?} skip_start_ack={} skip_finish_ack={} loose_ack={} blind_chunks={} chunk_gap_ms={} — first 16: {}",
         protocol,
         width,
         height,
         file_data.len(),
         chunk,
+        gatt_fragment,
+        gatt_fragment_gap_ms,
+        apk_loose_start,
         replace_pic_pos,
+        extended_dial_start,
+        dial_start_mid_from_dims,
         effective_preflight,
         preflight_upload2,
         preflight_cmd26_keys,
@@ -1521,8 +1751,7 @@ async fn cmd_upload_dial(
         println!("Preflight tail: getDialDeviceContrlReponse({ctrl}) — cmd32/3 + 1 byte…");
         let p = dial_device_control_response(ctrl);
         println!("  {}", hex(&p));
-        write_ch
-            .write(&p)
+        gatt_write_fragmented(&write_ch, &p, gatt_fragment, gatt_fragment_gap_ms)
             .await
             .context("dial device control response (cmd32/3)")?;
         tokio::time::sleep(Duration::from_millis(90)).await;
@@ -1537,11 +1766,39 @@ async fn cmd_upload_dial(
     if use_file34 {
         let start = file34_start(&file_data);
         println!("Start cmd34/2 (file len+sum): {}", hex(&start));
-        write_ch.write(&start).await.context("write start (file34)")?;
+        gatt_write_fragmented(&write_ch, &start, gatt_fragment, gatt_fragment_gap_ms)
+            .await
+            .context("write start (file34)")?;
     } else {
-        let start = dial_start(font_pos, custom_b, rgb_r, rgb_g, rgb_b, replace_pic_pos);
-        println!("Start cmd31/2: {}", hex(&start));
-        write_ch.write(&start).await.context("write start (dial31)")?;
+        let file_len_u32 = file_data.len() as u32;
+        let start = if extended_dial_start {
+            let mid4 = if dial_start_mid_from_dims {
+                dial_start_mid4_dims_be(width, height)
+            } else {
+                parse_mid4_hex(&dial_start_mid4)?
+            };
+            println!(
+                "Start cmd31/2 **extended** (17 B pl): mid4={} file_len={}",
+                hex(&mid4),
+                file_len_u32
+            );
+            dial_start_extended(
+                font_pos,
+                custom_b,
+                mid4,
+                rgb_r,
+                rgb_g,
+                rgb_b,
+                file_len_u32,
+            )
+        } else {
+            println!("Start cmd31/2 (minimal):");
+            dial_start(font_pos, custom_b, rgb_r, rgb_g, rgb_b, replace_pic_pos)
+        };
+        println!("  {}", hex(&start));
+        gatt_write_fragmented(&write_ch, &start, gatt_fragment, gatt_fragment_gap_ms)
+            .await
+            .context("write start (dial31)")?;
     }
 
     if dial_start_probe {
@@ -1550,6 +1807,7 @@ async fn cmd_upload_dial(
         );
         tokio::time::sleep(Duration::from_millis(150)).await;
         let probe_end = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut notify_count: u32 = 0;
         while tokio::time::Instant::now() < probe_end {
             let left = probe_end.saturating_duration_since(tokio::time::Instant::now());
             if left.is_zero() {
@@ -1559,20 +1817,34 @@ async fn cmd_upload_dial(
                 .await
             {
                 Ok(Some(data)) => {
+                    notify_count += 1;
                     println!("  notify ({}): {}", data.len(), hex(&data));
                     if let Some((c, s)) = parse_dc_short(&data) {
                         println!("    DC parse: cmd={c} sub={s}");
                     }
                     for pkt in asm.push(&data) {
                         println!("    CD assembled ({}): {}", pkt.len(), hex(&pkt));
+                        if is_dial_start_banner_cd(&pkt) {
+                            println!(
+                                "    dial start banner (0xCD cmd 0x15 sub 0x0c) — seen after some preflights"
+                            );
+                        }
                         if let Some(st) = parse_dial_watch_ack_status(&pkt) {
                             println!("    dial ACK status int: {st}");
+                        } else if let Some(st) = parse_cd_notify_status(&pkt) {
+                            println!("    CD payload int (loose): {st}");
                         }
                     }
                 }
                 Ok(None) => break,
                 Err(_) => {}
             }
+        }
+        if notify_count == 0 {
+            println!(
+                "  (no notifications in 10s — common on some FW: no splash until the first file chunk, \
+                 or start is accepted with no notify. Next step: short solid upload with --preflight-upload2.)"
+            );
         }
         drain_notifies(&mut notify_stream, &mut asm).await;
         println!("--dial-start-probe done.");
@@ -1588,7 +1860,16 @@ async fn cmd_upload_dial(
         tokio::time::sleep(Duration::from_millis(120)).await;
         drain_notifies(&mut notify_stream, &mut asm).await;
     } else {
-        wait_notify_status(&mut notify_stream, &mut asm, 1000, step, loose_ack, use_file34).await?;
+        wait_notify_status(
+            &mut notify_stream,
+            &mut asm,
+            1000,
+            step,
+            loose_ack,
+            use_file34,
+            apk_loose_start,
+        )
+        .await?;
     }
 
     let mut off = 0usize;
@@ -1606,7 +1887,9 @@ async fn cmd_upload_dial(
             piece.len(),
             frame.len()
         );
-        write_ch.write(&frame).await.context("write chunk")?;
+        gatt_write_fragmented(&write_ch, &frame, gatt_fragment, gatt_fragment_gap_ms)
+            .await
+            .context("write chunk")?;
         if blind_chunks {
             tokio::time::sleep(Duration::from_millis(15)).await;
             if chunk_gap_ms > 0 {
@@ -1620,6 +1903,7 @@ async fn cmd_upload_dial(
                 step,
                 loose_ack,
                 use_file34,
+                false,
             )
             .await?;
         }
@@ -1630,11 +1914,15 @@ async fn cmd_upload_dial(
     if use_file34 {
         let fin = file34_finish_frame();
         println!("Finish cmd34/3: {}", hex(&fin));
-        write_ch.write(&fin).await.context("write finish (file34)")?;
+        gatt_write_fragmented(&write_ch, &fin, gatt_fragment, gatt_fragment_gap_ms)
+            .await
+            .context("write finish (file34)")?;
     } else {
         let fin = dial_finish_payload(&file_data);
         println!("Finish cmd31/3 ({} bytes): {}", fin.len(), hex(&fin));
-        write_ch.write(&fin).await.context("write finish (dial31)")?;
+        gatt_write_fragmented(&write_ch, &fin, gatt_fragment, gatt_fragment_gap_ms)
+            .await
+            .context("write finish (dial31)")?;
     }
     if skip_finish_ack {
         println!("Skipping finish ACK wait (--skip-finish-ack). Draining notifies…");
@@ -1642,7 +1930,16 @@ async fn cmd_upload_dial(
         drain_notifies(&mut notify_stream, &mut asm).await;
         println!("Done — finish frame sent (notify status 2 not verified). Check the badge.");
     } else {
-        wait_notify_status(&mut notify_stream, &mut asm, 2, step, loose_ack, use_file34).await?;
+        wait_notify_status(
+            &mut notify_stream,
+            &mut asm,
+            2,
+            step,
+            loose_ack,
+            use_file34,
+            false,
+        )
+        .await?;
         println!("Done — device reported success (status 2).");
     }
 
@@ -1699,6 +1996,9 @@ async fn cmd_probe_upload(
             255,
             255,
             None,
+            false,
+            "15a20008".to_string(),
+            false,
             6_000,
             false,
             reconnect,
@@ -1715,6 +2015,10 @@ async fn cmd_probe_upload(
             &[],
             false,
             None,
+            0,
+            100,
+            false,
+            false,
         )
         .await;
         match r {
@@ -2070,6 +2374,158 @@ async fn cmd_is_connected(
     Ok(())
 }
 
+/// Standard **Battery Level** characteristic UUID (`0x2A19`).
+const BATTERY_LEVEL_CHAR_UUID: &str = "00002a19-0000-1000-8000-00805f9b34fb";
+
+/// Subscribe to **Battery Level** NOTIFY when available (prints only when the device pushes an update).
+/// If NOTIFY is missing or subscribe fails, falls back to periodic GATT reads (`--interval-secs`).
+async fn cmd_battery_watch(
+    adapter: &Adapter,
+    addr_str: &str,
+    interval_secs: u64,
+    duration_secs: u64,
+    disconnect_after: bool,
+) -> anyhow::Result<()> {
+    let addr: Address = addr_str
+        .parse()
+        .with_context(|| format!("invalid BLE address: {addr_str}"))?;
+
+    warm_scan_le_if_unseen(adapter, addr, 0).await?;
+
+    let device = adapter.device(addr).context("adapter.device")?;
+    println!("Device {} (adapter {})", addr, adapter.name());
+    if let Err(e) = device.set_trusted(true).await {
+        eprintln!("Warning: could not set Trusted=true ({e})");
+    }
+
+    println!("Connecting (timeout {:?})…", BLE_CONNECT_TIMEOUT);
+    device_connect(&device, BLE_CONNECT_TIMEOUT, None).await?;
+
+    let bat_uuid = Uuid::parse_str(BATTERY_LEVEL_CHAR_UUID).context("battery level uuid")?;
+    let ch = find_characteristic(&device, bat_uuid).await?;
+    let flags = ch.flags().await.context("battery char flags")?;
+
+    println!(
+        "Battery Level (0x2A19): READ={} NOTIFY={}",
+        flags.read, flags.notify
+    );
+
+    let notify_stream = if flags.notify {
+        match tokio::time::timeout(NOTIFY_ENABLE_TIMEOUT, ch.notify()).await {
+            Ok(Ok(s)) => Some(s),
+            Ok(Err(e)) => {
+                eprintln!("notify subscribe failed ({e}); falling back to periodic reads");
+                None
+            }
+            Err(_) => {
+                eprintln!("notify subscribe timed out; falling back to periodic reads");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let end_at: Option<Instant> = if duration_secs > 0 {
+        Some(Instant::now() + Duration::from_secs(duration_secs))
+    } else {
+        None
+    };
+    let end_at_tokio: Option<tokio::time::Instant> = end_at.map(tokio::time::Instant::from_std);
+
+    if let Some(ns) = notify_stream {
+        pin_mut!(ns);
+        println!("Subscribed to NOTIFY only — output when the device pushes a new battery level (no polling reads).");
+        if end_at.is_some() {
+            println!("Stopping after {duration_secs}s (Ctrl+C to exit early).");
+        } else {
+            println!("Press Ctrl+C to stop.");
+        }
+        loop {
+            if let Some(end) = end_at {
+                if Instant::now() >= end {
+                    println!("Duration elapsed.");
+                    break;
+                }
+            }
+            tokio::select! {
+                n = ns.next() => {
+                    match n {
+                        Some(data) => println!(
+                            "[{}] {}",
+                            Local::now().format("%H:%M:%S"),
+                            device_info_gatt::decode_battery_level(&data)
+                        ),
+                        None => {
+                            eprintln!("notify stream ended");
+                            break;
+                        }
+                    }
+                }
+                _ = tokio::time::sleep_until(end_at_tokio.unwrap()), if end_at_tokio.is_some() => {
+                    println!("Duration elapsed.");
+                    break;
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    println!("Interrupted.");
+                    break;
+                }
+            }
+        }
+    } else {
+        let step = interval_secs.max(1);
+        let mut ticker = tokio::time::interval(Duration::from_secs(step));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        eprintln!(
+            "No NOTIFY subscription — polling with GATT read every {}s.",
+            step
+        );
+        if end_at.is_some() {
+            println!(
+                "Sampling every {}s for {}s total (Ctrl+C to stop early).",
+                step, duration_secs
+            );
+        } else {
+            println!("Sampling every {}s until Ctrl+C.", step);
+        }
+        loop {
+            if let Some(end) = end_at {
+                if Instant::now() >= end {
+                    println!("Duration elapsed.");
+                    break;
+                }
+            }
+            tokio::select! {
+                _ = ticker.tick() => {
+                    if flags.read {
+                        match ch.read().await {
+                            Ok(raw) => println!(
+                                "[{}] {}",
+                                Local::now().format("%H:%M:%S"),
+                                device_info_gatt::decode_battery_level(&raw)
+                            ),
+                            Err(e) => eprintln!("read error: {e}"),
+                        }
+                    } else {
+                        eprintln!("characteristic not readable and NOTIFY unavailable — nothing to do");
+                        break;
+                    }
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    println!("Interrupted.");
+                    break;
+                }
+            }
+        }
+    }
+
+    if disconnect_after {
+        device_disconnect_best_effort(&device).await;
+        println!("Disconnected.");
+    }
+    Ok(())
+}
+
 /// GATT **Device Information** (0x180A) — decoded reads like BLE scanner apps.
 async fn cmd_device_info(
     adapter: &Adapter,
@@ -2224,6 +2680,16 @@ mod tests {
         );
         assert_eq!(PREFLIGHT_UPLOAD2_DC1, [0xDC, 0x00, 0x05, 0x15, 0x0C, 0x00, 0x1E, 0x01]);
         assert_eq!(PREFLIGHT_UPLOAD2_DC2, [0xDC, 0x00, 0x05, 0x20, 0x02, 0x00, 0x28, 0x01]);
+        assert_eq!(PREFLIGHT_UPLOAD2_DC_BEFORE_WEATHER, [
+            0xDC, 0x00, 0x05, 0x20, 0x03, 0x00, 0x12, 0x01
+        ]);
+        assert_eq!(
+            PREFLIGHT_UPLOAD2_WEATHER_FRAG1,
+            [
+                0xCD, 0x00, 0x4D, 0x12, 0x01, 0x20, 0x00, 0x48, 0x0A, 0x4C, 0x69, 0x74, 0x68, 0x65,
+                0x72, 0x6C, 0x61, 0x6E, 0x64, 0x03
+            ]
+        );
     }
 
     #[test]
