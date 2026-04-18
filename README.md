@@ -119,6 +119,8 @@ Omit **`--reconnect`** if the link is already stable; add **`--reconnect`** if G
 
 **Automated matrix (iPhone / APK order, uploading UI checks):** run **`dg01-ble/scripts/run_upload_like_app_tests.sh`** from the **`dg01-ble`** directory after **`cargo build --release`**. It runs **`is-connected`**, **`device-info`**, **`dial-dims`**, several **`dial-start-probe`** sequences with **`--preflight-upload2`**, then optional full solid uploads. Set **`SKIP_FULL_UPLOAD=1`** to skip long transfers; **`DG01_ADDR=…`** to override the MAC.
 
+**Extra probes (no capture needed):** **`dg01-ble/scripts/run_extra_ble_probes.sh`** runs **`sync-time`**, **`query`**, **`dial-status`**, small **64×64** upload attempts (often **fail start ACK** if firmware expects **360×360** — see script header), and optional **`RUN_DIM_MATCH_UPLOAD=1`** for a **full–screen solid** with **`--skip-start-ack`** (debug only; long run).
+
 **`upload-dial`** defaults are tuned toward phone captures: **`--gatt-fragment-gap-ms 3`**, **`--step-timeout-ms 10000`**. **`--apk-parity`** enforces at least **10 s** step timeout and **3 ms** fragment gap. Other useful flags:
 
 - **`--min-battery-percent N`** — read **BAS** (same service as **`device-info`**) before sending payload; abort if level is below **N** (**0** = off).
