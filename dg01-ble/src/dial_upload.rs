@@ -59,6 +59,11 @@ impl CdNotifyAssembler {
 /// **Start ACK** (status **1000** before first file chunk — the step that arms the badge “uploading” UI in the
 /// stock app) is sometimes sent as **cmd 31** + sub **2** (mirror of `getDialUpdateStartValue`), which we
 /// previously ignored — leading to `--skip-start-ack` and no on-device upload splash.
+///
+/// ## Fatal protocol statuses (`< 1000`, not chunk ACK `>= 1000`)
+///
+/// Same mapping as **`WatchThemeTools.response`** / **`BleFileSendTools.response`** on the first payload **i32 BE**
+/// (`BaseReceiveData.parseDialUpCode`). Stock Android toasts: `battery_low_not_dial_clock` (3), `charge_battery_not_dial_clock` (4).
 pub fn parse_dial_watch_ack_status(packet: &[u8]) -> Option<i32> {
     let cmd = packet.get(3).copied()?;
     let sub = packet.get(5).copied()?;
@@ -71,6 +76,27 @@ pub fn parse_dial_watch_ack_status(packet: &[u8]) -> Option<i32> {
         return None;
     }
     parse_cd_notify_status(packet)
+}
+
+/// `true` if firmware status `code` (`< 1000`) means the upload cannot proceed — abort waits instead of spinning.
+///
+/// Matches APK branches that call `upgradeFailed(...)` for device-reported errors (not **1001**/**1002** timeouts, which are client-side).
+pub fn is_watch_theme_fatal_protocol_status(code: i32) -> bool {
+    matches!(code, 1 | 3 | 4 | 5 | 7)
+}
+
+/// Human-readable reason for a fatal **`WatchThemeTools`** / **`BleFileSendTools`** protocol status (`< 1000`).
+///
+/// Returns **`None`** for non-fatal or unknown codes (e.g. chunk **1000+n** uses `>= 1000`).
+pub fn watch_theme_protocol_error_message(code: i32) -> Option<&'static str> {
+    match code {
+        1 => Some("check failed (APK ERROR_CHECK 1003 — verify / checksum)"),
+        3 => Some("battery too low to upgrade dial (APK ERROR_BATTERY_LOW 1008)"),
+        4 => Some("charging — device refuses watch face upgrade (APK ERROR_CHARGE_BATTERY 1009)"),
+        5 => Some("out of memory (APK ERROR_OUT_OF_MEMORY 1010; cmd 31 path)"),
+        7 => Some("unknown / not ready (APK ERROR_UNKNOWN 1007)"),
+        _ => None,
+    }
 }
 
 /// `SendData.getDialDeviceContrlReponse` — **cmd 32** sub **3** with a **single** payload byte (not empty `getNoValueProtocol`).
@@ -427,6 +453,20 @@ mod tests {
     fn dc_short_file34_start_sample() {
         let s = [0xDCu8, 0x00, 0x05, 0x22, 0x02, 0x00, 0x10, 0x00];
         assert_eq!(parse_dc_short(&s), Some((34, 2)));
+    }
+
+    #[test]
+    fn watch_theme_fatal_status_matches_apk() {
+        assert!(is_watch_theme_fatal_protocol_status(1));
+        assert!(is_watch_theme_fatal_protocol_status(3));
+        assert!(is_watch_theme_fatal_protocol_status(7));
+        assert!(!is_watch_theme_fatal_protocol_status(2));
+        assert!(!is_watch_theme_fatal_protocol_status(1000));
+        assert!(
+            watch_theme_protocol_error_message(3)
+                .unwrap()
+                .contains("battery")
+        );
     }
 
     #[test]

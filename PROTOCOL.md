@@ -206,6 +206,25 @@ Defined in `Profile.PBSmartBandCommandId` / `SendData` / `WatchThemeTools`:
 
 Responses are correlated by sequence in `WatchThemeTools.response` (expects status codes `1000+n` for ACK of chunk `n`, etc.).
 
+**Firmware error statuses (`< 1000`, first payload i32 BE — `parseDialUpCode`):** the stock app maps these to user-visible failures (same as iOS behaviour when the device refuses the transfer). `dg01-ble upload-dial` aborts with an explanatory error when it sees them.
+
+| Status | APK constant | Typical meaning |
+|--------|----------------|-----------------|
+| `1` | ERROR_CHECK 1003 | Check / verify failed |
+| `2` | (success) | Finish success (not an error) |
+| `3` | ERROR_BATTERY_LOW 1008 | Battery too low |
+| `4` | ERROR_CHARGE_BATTERY 1009 | Charging — upgrade refused |
+| `5` | ERROR_OUT_OF_MEMORY 1010 | OOM (cmd **31** path in `WatchThemeTools`) |
+| `7` | ERROR_UNKNOWN 1007 | Not ready / fallback in APK |
+
+**APK behaviours not fully replicated in `dg01-ble` (review):**
+
+- **OTA firmware** (not dial **31**): the app blocks **`Constant.mCurBatteryNum <= 30`** before starting firmware OTA (`DeviceBaseFragment` → `battery_low_not_update_ota`). `dg01-ble` has no OTA command; use **`device-info`** / **`battery-watch`** for GATT % and judge manually.
+- **Client-side timeouts:** `WatchThemeTools` uses **1001** (wait timeout) and **1002** (resend timeout) from timers; **`upload-dial --step-timeout-ms`** is the closest knob.
+- **Resend / retry:** the APK calls `readStatus()` and resends chunks on mismatch; **`--reconnect`**, **`--blind-chunks`**, **`--chunk-gap-ms`** cover partial parity.
+- **Paid watch themes:** `TabBaseFragment.getWatchChargeStatus()` gates the **H5** store — unrelated to device battery.
+- **cmd 32 sub 3** “enter watch theme” UI flow (`deviceControlEnterWatchTheme`) is interactive; **`--dial32-sub3-control`** only sends the control byte if you need it for preflight parity.
+
 **Correct width × height:** the APK does **not** hardcode a single resolution. It stores **`ClockDialInfoBody.width` / `.height`** from the device response to **`getDialClockInfo`** (**cmd 32** sub **2**), parsed in `BaseReceiveData.parseDialInfo` (same layout as `dg01-ble`’s `parse_dial_clock_info_cd`). **`dg01-ble dial-dims`** sends that read and prints raw notifies plus parsed **width** / **height** (and **RGB565** byte count). Prefer **`upload-dial --use-device-dial-dims`** so the tool reads those values before `--solid` / `--strip-bmp`; only use **`--width` / `--height`** when you already know them or are testing.
 
 **Linux try — read dimensions only:** `cargo run --release -- dial-dims --addr <MAC> --disconnect` sends **`getDialClockInfo`** (cmd **32** sub **2**), reassembles split **`0xCD`** notifies, and prints **screenType**, **grade**, **width**, **height**, and **width×height×2** (RGB565 body size). Example on DG01: **360×360** → **259200** bytes.

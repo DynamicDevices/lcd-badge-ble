@@ -37,6 +37,7 @@ use dial_upload::{
     file34_file_frame, file34_finish_frame, file34_start, is_dial_start_banner_cd,
     parse_cd_notify_status, parse_dc_short, parse_dial_clock_info_cd, parse_mid4_hex,
     parse_dial_clock_info_full, parse_dial_watch_ack_status, solid_rgb565_buffer, strip_bmp_rgb565_tail,
+    is_watch_theme_fatal_protocol_status, watch_theme_protocol_error_message,
     CdNotifyAssembler, DialClockInfoParsed, CMD_DIAL_TRANSFER, CMD_FILE_UART, SUB_DIAL_FINISH,
     SUB_DIAL_NOTIFY_CLOCK_INFO, SUB_DIAL_START,
 };
@@ -1292,8 +1293,10 @@ where
                 if code == want {
                     return Ok(());
                 }
-                if code < 1000 && matches!(code, 1 | 3 | 4 | 5) {
-                    bail!("device returned error status {code} (see APK WatchThemeTools)");
+                if code < 1000 && is_watch_theme_fatal_protocol_status(code) {
+                    let detail = watch_theme_protocol_error_message(code)
+                        .unwrap_or("fatal device status (see APK WatchThemeTools / BleFileSendTools)");
+                    bail!("device returned protocol status {code}: {detail}");
                 }
                 println!("  (expected {want}, still waiting…)");
             } else {
