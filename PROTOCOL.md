@@ -26,6 +26,7 @@ Working notes for the Temu-style **DG01** LCD pin (SuperBand app on iPhone). The
 - **BlueZ `bluetoothctl connect <MAC>`** has succeeded when the phone is not holding the link; use **`menu gatt`** / **`list-attributes`** to enumerate GATT when Bleak fails.
 - A captured session: **`gatt_dump_dg01.txt`** (raw `bluetoothctl` output).
 - **`dg01-ble connect` / `disconnect`:** use **`org.bluez.Device1.Connect`** / **`Disconnect`** (same as the Ubuntu **Bluetooth** settings switch). The tool sets **`Trusted=true`** before connect when allowed (useful when the UI shows **Paired: No**). No LE scan by default; **`--warm-scan-secs N`** with **`N`** > 0 runs discovery only if the device is not yet in BlueZ’s cache and you need to create the object before **`Connect`**.
+- **`upload-dial` / `query` / UART subcommands:** use **default** NUS UUIDs **`7e400002`** / **`7e400003`** on **this DG01**. The FitPro APK uses **`6e400002`** / **`6e400003`** (`--apk-uart` in **`dg01-ble`**); using **`--apk-uart`** against real DG01 hardware causes **characteristic not found**.
 - **`dg01-ble find`:** calls **`Connect()`** then performs GATT writes. **`ServicesResolved`** is **not** a prerequisite for calling **`Connect`**; GATT discovery follows the ACL. Use **`--connect-timeout-secs`**, **`--nus-profile-connect`**, or **`--reconnect`** if the link is flaky.
 
 ## GATT — services and characteristics

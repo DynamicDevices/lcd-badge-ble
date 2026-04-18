@@ -374,6 +374,9 @@ enum Command {
         #[arg(long, default_value = DEFAULT_NOTIFY_UUID)]
         notify_uuid: String,
 
+        /// Use Nordic UART UUIDs from the **FitPro / SuperBand APK** (`6e400002` / `6e400003`) instead of the **DG01
+        /// hardware** defaults (`7e400002` / `7e400003`). For a **real DG01** connected to Linux, leave this **off**
+        /// — otherwise GATT lookup fails with “characteristic not found”.
         #[arg(long)]
         apk_uart: bool,
 
@@ -1891,12 +1894,22 @@ async fn cmd_upload_dial(
         device_connect(&device, BLE_CONNECT_TIMEOUT, None).await?;
     }
 
+    wait_gatt_ready_for_upload(&device).await;
+
     let write_ch = find_characteristic(&device, wu)
         .await
-        .with_context(|| format!("write characteristic not found: {write_uuid_str}"))?;
+        .with_context(|| {
+            format!(
+                "write characteristic not found: {write_uuid_str} — real DG01 NUS TX is 7e400002 (default); --apk-uart uses 6e400002 (FitPro APK only)"
+            )
+        })?;
     let notify_ch = find_characteristic(&device, nu)
         .await
-        .with_context(|| format!("notify characteristic not found: {notify_uuid_str}"))?;
+        .with_context(|| {
+            format!(
+                "notify characteristic not found: {notify_uuid_str} — DG01 default is 7e400003; --apk-uart uses 6e400003"
+            )
+        })?;
 
     println!("Subscribing to notifications…");
     let notify_stream = tokio::time::timeout(NOTIFY_ENABLE_TIMEOUT, notify_ch.notify())
@@ -2568,6 +2581,35 @@ async fn connect_uart(
 async fn device_disconnect_best_effort(device: &Device) {
     match tokio::time::timeout(BLE_DISCONNECT_TIMEOUT, device.disconnect()).await {
         Ok(Ok(())) | Ok(Err(_)) | Err(_) => {}
+    }
+}
+
+/// After **`Connect()`**, BlueZ may not list GATT until **`ServicesResolved`** is true; polling avoids
+/// intermittent “characteristic not found” on the first **`device.services()`** pass.
+async fn wait_gatt_ready_for_upload(device: &Device) {
+    const POLL_MS: u64 = 150;
+    const MAX_WAIT: Duration = Duration::from_secs(30);
+    let deadline = Instant::now() + MAX_WAIT;
+    loop {
+        match device.is_services_resolved().await {
+            Ok(true) => {
+                println!("GATT: ServicesResolved=true — cache ready for NUS lookup");
+                return;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("Warning: is_services_resolved: {e} — continuing");
+                return;
+            }
+        }
+        if Instant::now() >= deadline {
+            eprintln!(
+                "Warning: ServicesResolved still false after {:?} — continuing (first GATT access may populate services)",
+                MAX_WAIT
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(POLL_MS)).await;
     }
 }
 

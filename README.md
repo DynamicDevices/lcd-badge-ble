@@ -82,6 +82,13 @@ There is **no** CLI command to list the phone-style **catalogue of installed wat
 
 **Uploading splash on the badge:** the stock app waits for a **start ACK** (status **1000**) after **cmd 31/2** before sending chunks; **`--skip-start-ack`** skips that wait and may mean the device **never shows** the uploading screen even if data still transfers — see **[PROTOCOL.md](PROTOCOL.md)**.
 
+## DG01 hardware vs FitPro APK UART UUIDs
+
+The **DG01** exposes Nordic UART Service with UUIDs **`7e400001` / `7e400002` / `7e400003`** (see **[PROTOCOL.md](PROTOCOL.md)**). The **SuperBand / FitPro** Android build uses the same 128-bit layout but with **`6e40…`** instead of **`7e40…`**.
+
+- **Talking to a real DG01 from Linux:** use **defaults** — do **not** pass **`--apk-uart`** on **`query`**, **`upload-dial`**, **`dial-status`**, etc. Wrong UUIDs produce **“characteristic not found”** even when the link is up.
+- **`--apk-uart`:** only when emulating **APK wire captures** or a peripheral that actually exposes **`6e400002`**.
+
 ## APK-style status reads and upload tuning (`dial-status`, `file-send-status`, `upload-dial`)
 
 FitPro uses periodic **`readStatus()`**-style UART polls during long transfers. **`dg01-ble`** exposes the same **no-payload** frames for debugging stalls:
@@ -92,9 +99,23 @@ FitPro uses periodic **`readStatus()`**-style UART polls during long transfers. 
 | **`file-send-status`** | **`getNoValueProtocol(35, 1)`** — **`getFileSendStatus()`** | File (**cmd 34**) path |
 
 ```bash
-cd dg01-ble && cargo run --release -- dial-status --addr 0A:93:79:0C:DD:20 --apk-uart --disconnect
-cd dg01-ble && cargo run --release -- file-send-status --addr 0A:93:79:0C:DD:20 --apk-uart --disconnect
+# DG01 on Linux — omit --apk-uart (defaults use 7e400002/7e400003)
+cd dg01-ble && cargo run --release -- dial-status --addr 0A:93:79:0C:DD:20 --disconnect
+cd dg01-ble && cargo run --release -- file-send-status --addr 0A:93:79:0C:DD:20 --disconnect
 ```
+
+**Watchface upload (DG01, solid test pattern)** — phone Bluetooth off; if **`Connect()`** hangs, disconnect the badge once (`bluetoothctl` or **`dg01-ble disconnect`**) and retry:
+
+```bash
+cd dg01-ble && cargo run --release -- upload-dial \
+  --addr 0A:93:79:0C:DD:20 \
+  --solid --use-device-dial-dims \
+  --preflight-upload2 \
+  --apk-parity \
+  --disconnect
+```
+
+Omit **`--reconnect`** if the link is already stable; add **`--reconnect`** if GATT was stale. Use **`--skip-start-ack`** only for debugging (see **[PROTOCOL.md](PROTOCOL.md)**).
 
 **`upload-dial`** defaults are tuned toward phone captures: **`--gatt-fragment-gap-ms 3`**, **`--step-timeout-ms 10000`**. **`--apk-parity`** enforces at least **10 s** step timeout and **3 ms** fragment gap. Other useful flags:
 
