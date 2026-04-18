@@ -257,6 +257,38 @@ pub async fn print_battery_service(device: &Device) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// First readable **Battery Level** (`0x2A19`) value as **0–100** percent, or **`None`** if missing/unreadable.
+pub async fn read_battery_level_percent(device: &Device) -> anyhow::Result<Option<u8>> {
+    let want_service = uuid_from_u16(BATTERY_SERVICE);
+    for service in device.services().await.context("GATT services")? {
+        let su = service.uuid().await.context("service uuid")?;
+        if su != want_service {
+            continue;
+        }
+        for ch in service.characteristics().await.context("characteristics")? {
+            let u = ch.uuid().await.context("char uuid")?;
+            if u16_from_uuid(&u) != Some(0x2a19) {
+                continue;
+            }
+            let flags = ch.flags().await.context("char flags")?;
+            if !flags.read {
+                continue;
+            }
+            match ch.read().await {
+                Ok(raw) if !raw.is_empty() => {
+                    let p = raw[0];
+                    if p <= 100 {
+                        return Ok(Some(p));
+                    }
+                }
+                _ => {}
+            }
+        }
+        break;
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

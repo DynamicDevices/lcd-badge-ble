@@ -21,7 +21,7 @@ Decompiled tree: `../superband_jadx_src/sources/` (not always in git). This docu
 - **Inter-write delay:** **`sendSpaceDuraion`** (default **100** ms). During watchface UI work, the app sets **`CommandPool.setSendSpaceDuraion(3)`** before starting the transfer and restores **100** after success/failure (`ClockDialListActivity` listener). **`dg01-ble`** exposes **`--gatt-fragment-gap-ms`** (default 100) — try **3** to match aggressive app timing if the link stalls.
 - **Write lock:** semaphore **`write_characer_lock`** serializes GATT writes (conceptually similar to sequential `await` writes in Rust).
 
-**Gap:** Rust does not auto-switch gap from 100 → 3 for upload; user must pass **`--gatt-fragment-gap-ms 3`** when emulating the app.
+**Implemented in `dg01-ble`:** **`upload-dial`** defaults **`--gatt-fragment-gap-ms`** to **3** and **`--step-timeout-ms`** to **10000** (APK-style). Use **`--apk-parity`** to enforce at least **10 s** step timeout and **3 ms** fragment gap even if you pass lower values elsewhere.
 
 ---
 
@@ -32,9 +32,9 @@ Decompiled tree: `../superband_jadx_src/sources/` (not always in git). This docu
 | Chunk size | **`WRITE_MAX_SIZE`** **120** if **`intToBinary(config)[1]==1`**, else **200** | **`--use-device-dial-dims`** + **`apk_dial_chunk_size_from_config_byte`** |
 | Start payload | Short: **font, custom, RGB** (+ optional **replacePicPos**). Extended paths combine font + image + **thumb** with OEM headers (`convertYiZhaoWeiBin`, rotation). | Minimal + **`--extended-dial-start`**, **`--strip-bmp`**, solid test pattern — full APK image pipeline not ported |
 | Finish trailer | **`calculateFinishCheckcode`**: **`NumberUtils.intToBytes`** ( **big-endian** ) length + sum of all file bytes | **`dial_finish_payload`** — BE u32 length + BE u32 sum ✓ |
-| Per-step timeout | Main timer **10 s**, tick **2 s**; on tick while **`j <= 8000`**, **`readStatus()`** | **`--step-timeout-ms`** (single knob); no automatic **`getDialUpdateStatus`** poll |
-| Resend timer | **10 s** / **2 s** tick; **`j <= 8000`** → **`readStatus()`** | Not replicated — use **`--reconnect`** / **`--blind-chunks`** for parity experiments |
-| **`readStatus()`** | **`SendData.getDialUpdateStatus()`** = **`getReadDialValue(1)`** = **`getNoValueProtocol(32, 1)`** | Not exposed as standalone CLI (could add for debugging) |
+| Per-step timeout | Main timer **10 s**, tick **2 s**; on tick while **`j <= 8000`**, **`readStatus()`** | **`--step-timeout-ms`** (default **10000** ms); optional **`--dial-read-status-after-start`** (cmd **32**/1) |
+| Resend timer | **10 s** / **2 s** tick; **`j <= 8000`** → **`readStatus()`** | Optional **`--chunk-write-retries`** (default **1** extra resend per chunk on ACK timeout) |
+| **`readStatus()`** | **`SendData.getDialUpdateStatus()`** = **`getReadDialValue(1)`** = **`getNoValueProtocol(32, 1)`** | **`dg01-ble dial-status`** (same frame); optional **`--dial-read-status-after-start`** on **`upload-dial`** |
 | Device errors | Status **1,3,4,5,7** → fatal (mapped to **1003,1008,…** in UI) | **`wait_notify_status`** + **`watch_theme_protocol_error_message`** ✓ |
 | Client errors | **1004** missing image, **1005** font, **1006** disconnect, **1001/1002** timeouts | Partially covered (timeouts via **`step-timeout-ms`**) |
 
@@ -46,7 +46,7 @@ Decompiled tree: `../superband_jadx_src/sources/` (not always in git). This docu
 - **`setFileSendStatus`** in **`BaseReceiveData`** only forwards to **`BleFileSendTools`** when **`resultValueItem(5) == 1`** (same sub-key routing idea as cmd 32).
 - Main timeout uses **`MBInterstitialActivity.WEB_LOAD_TIME`** for millis-in-future (often **15 s** class); tick calls **`readStatus`** while **`j <= 13000`** — slightly different from **`WatchThemeTools`**.
 
-**Gap:** `upload-dial --protocol file34` does not implement a separate **cmd 35** status poll path like the APK.
+**Implemented:** **`dg01-ble file-send-status`** sends **`getNoValueProtocol(35, 1)`**; **`upload-dial --protocol file34 --file-read-status-after-start`** sends the same after start ACK **1000**.
 
 ---
 
@@ -72,17 +72,17 @@ Decompiled tree: `../superband_jadx_src/sources/` (not always in git). This docu
 - **OTA** (firmware): **`Constant.mCurBatteryNum <= 30`** blocks upgrade (`DeviceBaseFragment`) — separate from dial status **3**.
 - **Paid themes:** **`HttpHelper.getWatchChargeStatus()`** — server flag, not GATT.
 
-**Gap:** Rust has **`device-info`** / **`battery-watch`** for manual checks; no automatic “block upload if BAS &lt; X%” (firmware already returns **3** when it refuses).
+**Implemented:** **`upload-dial --min-battery-percent N`** aborts before payload when **BAS** reads below **N** (optional; **0** = off).
 
 ---
 
 ## 8. Suggested implementation backlog (priority)
 
-1. **Upload tuning:** document or default **lower `--gatt-fragment-gap-ms`** (e.g. **3**) when emulating successful phone captures.
-2. **Optional `dial-status` subcommand:** send **`getNoValueProtocol(32, 1)`** and print one **`0xCD`** / error — mirrors APK **`readStatus()`** when debugging stalls.
-3. **`file34` parity:** optional **cmd 35** read-status poll matching **`BleFileSendTools`**.
-4. **Extended image pipeline:** font + 8-bit + thumb prepend — only if you need full custom-face parity (large effort; JNI **`BmpConvertTools`** in APK).
-5. **Resend logic:** optional resend of last chunk on **1002**-style timeout — low priority if **`blind-chunks`** + stable power suffice.
+1. ~~**Upload tuning**~~ — default **`--gatt-fragment-gap-ms 3`**, **`--step-timeout-ms 10000`**; **`--apk-parity`** enforces minimums.
+2. ~~**`dial-status` subcommand**~~ — **`dial-status`** (cmd **32**/1).
+3. ~~**`file34` cmd 35 poll**~~ — **`file-send-status`** and **`--file-read-status-after-start`** on **`upload-dial`**.
+4. **Extended image pipeline:** font + 8-bit + thumb prepend — only if you need full custom-face parity (large effort; JNI **`BmpConvertTools`** in APK). **Not in scope** for this tool.
+5. ~~**Resend logic**~~ — **`--chunk-write-retries`** (default **1** resend on chunk ACK timeout).
 
 ---
 

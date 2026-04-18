@@ -13,6 +13,8 @@
 //! cd dg01-ble && cargo run --release -- query --addr 0A:93:79:0C:DD:20
 //! cd dg01-ble && cargo run --release -- dial-dims --addr 0A:93:79:0C:DD:20
 //! cd dg01-ble && cargo run --release -- upload-dial --addr ... --solid --skip-start-ack
+//! cd dg01-ble && cargo run --release -- dial-status --addr ... --apk-uart
+//! cd dg01-ble && cargo run --release -- file-send-status --addr ... --apk-uart
 //! cd dg01-ble && cargo run --release -- scan --seconds 15
 //! cd dg01-ble && cargo run --release -- is-connected --addr 0A:93:79:0C:DD:20
 //! cd dg01-ble && cargo run --release -- device-info --addr 0A:93:79:0C:DD:20   # DIS + Battery (0x180A, 0x180F)
@@ -61,6 +63,8 @@ const APK_UART_NOTIFY: &str = "6e400003-b5a3-f393-e0a9-e50e24dcca9d";
 const CMD_GET_INFO_BY_KEY: u8 = 26;
 /// `SendData.getReadDialValue` → `getNoValueProtocol((byte)32, key)`.
 const CMD_DIAL_READ: u8 = 32;
+/// `SendData.getReadFileValue` / **`getFileSendStatus()`** → `getNoValueProtocol((byte)35, key)` (`BleFileSendTools` status poll).
+const CMD_FILE_SEND_STATUS: u8 = 35;
 /// `SendData.getSetLanguage` → `SwitchProtocol(18, 21, lang)`.
 const KEY_SETTING_LANGUAGE: u8 = 21;
 /// `SendData.getTurnOnRealTimeStep` → `SwitchProtocol(21, 6, on)`.
@@ -241,6 +245,52 @@ enum Command {
         #[arg(long)]
         disconnect: bool,
     },
+    /// Send **`getNoValueProtocol(32, 1)`** — APK **`SendData.getDialUpdateStatus()`** / **`getReadDialValue(1)`**; print notifies (debug stalled **dial31** uploads).
+    DialStatus {
+        #[arg(long)]
+        addr: String,
+
+        #[arg(long, default_value = DEFAULT_WRITE_UUID)]
+        write_uuid: String,
+
+        #[arg(long, default_value = DEFAULT_NOTIFY_UUID)]
+        notify_uuid: String,
+
+        #[arg(long)]
+        apk_uart: bool,
+
+        #[arg(long, default_value_t = 5000)]
+        response_timeout_ms: u64,
+
+        #[arg(long, default_value_t = 200)]
+        notify_settle_ms: u64,
+
+        #[arg(long)]
+        disconnect: bool,
+    },
+    /// Send **`getNoValueProtocol(35, 1)`** — APK **`SendData.getFileSendStatus()`** / **`getReadFileValue(1)`**; print notifies (debug **file34** stalls).
+    FileSendStatus {
+        #[arg(long)]
+        addr: String,
+
+        #[arg(long, default_value = DEFAULT_WRITE_UUID)]
+        write_uuid: String,
+
+        #[arg(long, default_value = DEFAULT_NOTIFY_UUID)]
+        notify_uuid: String,
+
+        #[arg(long)]
+        apk_uart: bool,
+
+        #[arg(long, default_value_t = 5000)]
+        response_timeout_ms: u64,
+
+        #[arg(long, default_value_t = 200)]
+        notify_settle_ms: u64,
+
+        #[arg(long)]
+        disconnect: bool,
+    },
     /// Read standard Bluetooth **Device Information** (0x180A) and **Battery** (0x180F) services.
     /// Output is similar to nRF Connect / BLE scanner apps (DIS strings + PnP ID + battery %).
     DeviceInfo {
@@ -393,7 +443,8 @@ enum Command {
         #[arg(long)]
         dial_start_mid_from_dims: bool,
 
-        #[arg(long, default_value_t = 8000)]
+        /// Per-step notify wait (APK main timer **~10 s** for dial/file transfer).
+        #[arg(long, default_value_t = 10000)]
         step_timeout_ms: u64,
 
         #[arg(long)]
@@ -458,7 +509,7 @@ enum Command {
         #[arg(long)]
         blind_chunks: bool,
 
-        /// Extra APK-style options (same defaults apply without this; kept for explicit “all parity” runs).
+        /// FitPro-style upload tuning: forces **`--step-timeout-ms`** to at least **10000** and **`--gatt-fragment-gap-ms`** to **3** (chunk/dial-config rules unchanged).
         #[arg(long)]
         apk_parity: bool,
 
@@ -467,10 +518,26 @@ enum Command {
         #[arg(long)]
         gatt_fragment_bytes: Option<usize>,
 
-        /// Milliseconds between **GATT** fragments (**~100** ms in the APK pool). Ignored when fragment size
-        /// is **0**.
-        #[arg(long, default_value_t = 100)]
+        /// Milliseconds between **GATT** fragments (FitPro uses **~3** ms during watchface upload, **~100** ms
+        /// when idle). Ignored when fragment size is **0**.
+        #[arg(long, default_value_t = 3)]
         gatt_fragment_gap_ms: u64,
+
+        /// If **>0**, read **BAS** (0x180F / 0x2A19) after connect and abort when level is below this (**0** = off).
+        #[arg(long, default_value_t = 0)]
+        min_battery_percent: u8,
+
+        /// On **chunk** ACK timeout, resend the same chunk up to this many **extra** writes (**0** = no resend).
+        #[arg(long, default_value_t = 1)]
+        chunk_write_retries: u32,
+
+        /// After **dial31** start ACK **1000**, send **`getNoValueProtocol(32,1)`** and drain (APK **`readStatus()`**).
+        #[arg(long)]
+        dial_read_status_after_start: bool,
+
+        /// After **file34** start ACK **1000**, send **`getNoValueProtocol(35,1)`** and drain (**`getFileSendStatus()`**).
+        #[arg(long)]
+        file_read_status_after_start: bool,
 
         /// Only accept cmd **31**/status **1000** for dial start (omit this; APK also treats **0x15**/**0x0c** as start banner).
         #[arg(long)]
@@ -619,6 +686,62 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
         }
+        Command::DialStatus {
+            addr,
+            write_uuid,
+            notify_uuid,
+            apk_uart,
+            response_timeout_ms,
+            notify_settle_ms,
+            disconnect,
+        } => {
+            let (w, n) = if apk_uart {
+                (APK_UART_TX.to_string(), APK_UART_NOTIFY.to_string())
+            } else {
+                (write_uuid, notify_uuid)
+            };
+            cmd_uart_read_status(
+                &adapter,
+                &addr,
+                &w,
+                &n,
+                CMD_DIAL_READ,
+                1,
+                "getDialUpdateStatus / getReadDialValue(1) — cmd32/1",
+                response_timeout_ms,
+                notify_settle_ms,
+                disconnect,
+            )
+            .await?;
+        }
+        Command::FileSendStatus {
+            addr,
+            write_uuid,
+            notify_uuid,
+            apk_uart,
+            response_timeout_ms,
+            notify_settle_ms,
+            disconnect,
+        } => {
+            let (w, n) = if apk_uart {
+                (APK_UART_TX.to_string(), APK_UART_NOTIFY.to_string())
+            } else {
+                (write_uuid, notify_uuid)
+            };
+            cmd_uart_read_status(
+                &adapter,
+                &addr,
+                &w,
+                &n,
+                CMD_FILE_SEND_STATUS,
+                1,
+                "getFileSendStatus / getReadFileValue(1) — cmd35/1",
+                response_timeout_ms,
+                notify_settle_ms,
+                disconnect,
+            )
+            .await?;
+        }
         Command::DeviceInfo { addr, disconnect } => {
             cmd_device_info(&adapter, &addr, disconnect).await?;
         }
@@ -720,6 +843,10 @@ async fn main() -> anyhow::Result<()> {
             preflight_cmd26_keys,
             enter_ota_mode,
             dial32_sub3_control,
+            min_battery_percent,
+            chunk_write_retries,
+            dial_read_status_after_start,
+            file_read_status_after_start,
         } => {
             let (w, n) = if apk_uart {
                 (APK_UART_TX.to_string(), APK_UART_NOTIFY.to_string())
@@ -733,6 +860,12 @@ async fn main() -> anyhow::Result<()> {
             // WatchThemeTools: WRITE_MAX_SIZE 120 vs 200 from dial config — apply when using device dial info.
             let apply_chunk_from_dial_config =
                 !manual_chunk && (apk_auto_chunk || apk_parity || use_device_dial_dims);
+            let mut step_timeout_ms = step_timeout_ms;
+            let mut gatt_fragment_gap_ms = gatt_fragment_gap_ms;
+            if apk_parity {
+                step_timeout_ms = step_timeout_ms.max(10_000);
+                gatt_fragment_gap_ms = 3;
+            }
             cmd_upload_dial(
                 &adapter,
                 &addr,
@@ -771,6 +904,10 @@ async fn main() -> anyhow::Result<()> {
                 &preflight_cmd26_keys,
                 enter_ota_mode,
                 dial32_sub3_control,
+                min_battery_percent,
+                chunk_write_retries,
+                dial_read_status_after_start,
+                file_read_status_after_start,
                 gatt_fragment,
                 gatt_fragment_gap_ms,
                 apk_loose_start,
@@ -1196,6 +1333,93 @@ async fn cmd_dial_dims(
     );
 }
 
+/// Standalone **`getNoValueProtocol(cmd, sub)`** write + print notifies until **`response_timeout_ms`** (APK **`readStatus()`**-style debugging).
+async fn cmd_uart_read_status(
+    adapter: &Adapter,
+    addr_str: &str,
+    write_uuid_str: &str,
+    notify_uuid_str: &str,
+    cmd: u8,
+    sub: u8,
+    title: &str,
+    response_timeout_ms: u64,
+    notify_settle_ms: u64,
+    disconnect_after: bool,
+) -> anyhow::Result<()> {
+    let addr: Address = addr_str
+        .parse()
+        .with_context(|| format!("invalid BLE address: {addr_str}"))?;
+    let wu = Uuid::parse_str(write_uuid_str).context("write uuid")?;
+    let nu = Uuid::parse_str(notify_uuid_str).context("notify uuid")?;
+
+    let device = adapter.device(addr).context("adapter.device")?;
+    println!("Device {} (adapter {})", addr, adapter.name());
+
+    println!("Calling BlueZ Connect()…");
+    device_connect(&device, BLE_CONNECT_TIMEOUT, None).await?;
+
+    let write_ch = find_characteristic(&device, wu)
+        .await
+        .with_context(|| format!("write characteristic not found: {write_uuid_str}"))?;
+    let notify_ch = find_characteristic(&device, nu)
+        .await
+        .with_context(|| format!("notify characteristic not found: {notify_uuid_str}"))?;
+
+    println!("Subscribing to notifications…");
+    let notify_stream = tokio::time::timeout(NOTIFY_ENABLE_TIMEOUT, notify_ch.notify())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "notify subscribe timed out after {:?}",
+                NOTIFY_ENABLE_TIMEOUT
+            )
+        })?
+        .context("notify()")?;
+    pin_mut!(notify_stream);
+
+    println!("Notify settle {} ms…", notify_settle_ms);
+    tokio::time::sleep(Duration::from_millis(notify_settle_ms)).await;
+
+    let frame = get_no_value_protocol(cmd, sub);
+    println!("\n{title}");
+    println!("write {} ({} bytes)", hex(&frame), frame.len());
+    write_ch.write(&frame).await.context("write getNoValueProtocol")?;
+
+    let mut asm = CdNotifyAssembler::default();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(response_timeout_ms.max(200));
+
+    while tokio::time::Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(left.min(Duration::from_millis(500)), notify_stream.next()).await {
+            Ok(Some(data)) => {
+                println!("  notify ({} bytes): {}", data.len(), hex(&data));
+                if let Some(line) = decode_dc_notify_line(&data) {
+                    println!("{line}");
+                }
+                for pkt in asm.push(&data) {
+                    println!(
+                        "  assembled 0xCD ({} bytes): {}",
+                        pkt.len(),
+                        hex(&pkt[..pkt.len().min(128)])
+                    );
+                }
+            }
+            Ok(None) => {
+                println!("  (notify stream ended)");
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+
+    println!("Listen window done ({} ms).", response_timeout_ms);
+    if disconnect_after {
+        device_disconnect_best_effort(&device).await;
+        println!("Disconnected.");
+    }
+    Ok(())
+}
+
 fn parse_ack_packet(packet: &[u8], loose_ack: bool) -> Option<i32> {
     if loose_ack {
         parse_cd_notify_status(packet)
@@ -1320,6 +1544,28 @@ where
             _ => break,
         }
     }
+}
+
+async fn write_no_value_poll_and_drain<S>(
+    write_ch: &Characteristic,
+    stream: &mut S,
+    asm: &mut CdNotifyAssembler,
+    cmd: u8,
+    sub: u8,
+    label: &str,
+) -> anyhow::Result<()>
+where
+    S: futures::Stream<Item = Vec<u8>> + Unpin,
+{
+    let frame = get_no_value_protocol(cmd, sub);
+    println!("{label}: write {}", hex(&frame));
+    write_ch
+        .write(&frame)
+        .await
+        .with_context(|| label.to_string())?;
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    drain_notifies(stream, asm).await;
+    Ok(())
 }
 
 async fn run_preflight_uart<S>(
@@ -1590,6 +1836,10 @@ async fn cmd_upload_dial(
     preflight_cmd26_keys: &[u8],
     enter_ota_mode: bool,
     dial32_sub3_control: Option<u8>,
+    min_battery_percent: u8,
+    chunk_write_retries: u32,
+    dial_read_status_after_start: bool,
+    file_read_status_after_start: bool,
     gatt_fragment: usize,
     gatt_fragment_gap_ms: u64,
     apk_loose_start: bool,
@@ -1663,6 +1913,23 @@ async fn cmd_upload_dial(
     let mut asm = CdNotifyAssembler::default();
     let step = Duration::from_millis(step_timeout_ms);
 
+    if min_battery_percent > 0 {
+        match device_info_gatt::read_battery_level_percent(&device).await? {
+            Some(p) if p < min_battery_percent => {
+                bail!(
+                    "battery {p}% is below --min-battery-percent {min_battery_percent}% (abort before upload)"
+                );
+            }
+            Some(p) => println!(
+                "Battery (BAS): {p}% — gate OK (≥ {min_battery_percent}%)"
+            ),
+            None => println!(
+                "Warning: could not read BAS battery level — continuing (--min-battery-percent {})",
+                min_battery_percent
+            ),
+        }
+    }
+
     let mut dial_info: Option<DialClockInfoParsed> = None;
     if use_device_dial_dims {
         let info = fetch_dial_clock_info(&write_ch, &mut notify_stream, &mut asm).await?;
@@ -1706,7 +1973,7 @@ async fn cmd_upload_dial(
     };
 
     println!(
-        "protocol={} size={}×{} payload={} bytes chunk={} gatt_frag={} gatt_gap_ms={} apk_loose_start={} replace_pic_pos={:?} extended_start={} mid_from_dims={} preflight={} preflight_upload2={} cmd26_keys={:?} enter_ota={} dial32_sub3={:?} skip_start_ack={} skip_finish_ack={} loose_ack={} blind_chunks={} chunk_gap_ms={} — first 16: {}",
+        "protocol={} size={}×{} payload={} bytes chunk={} gatt_frag={} gatt_gap_ms={} min_bat={} chunk_retries={} dial32/1_after_start={} cmd35/1_after_start={} apk_loose_start={} replace_pic_pos={:?} extended_start={} mid_from_dims={} preflight={} preflight_upload2={} cmd26_keys={:?} enter_ota={} dial32_sub3={:?} skip_start_ack={} skip_finish_ack={} loose_ack={} blind_chunks={} chunk_gap_ms={} — first 16: {}",
         protocol,
         width,
         height,
@@ -1714,6 +1981,10 @@ async fn cmd_upload_dial(
         chunk,
         gatt_fragment,
         gatt_fragment_gap_ms,
+        min_battery_percent,
+        chunk_write_retries,
+        dial_read_status_after_start,
+        file_read_status_after_start,
         apk_loose_start,
         replace_pic_pos,
         extended_dial_start,
@@ -1875,8 +2146,32 @@ async fn cmd_upload_dial(
         .await?;
     }
 
+    if !use_file34 && dial_read_status_after_start {
+        write_no_value_poll_and_drain(
+            &write_ch,
+            &mut notify_stream,
+            &mut asm,
+            CMD_DIAL_READ,
+            1,
+            "dial readStatus poll (cmd32/1)",
+        )
+        .await?;
+    }
+    if use_file34 && file_read_status_after_start {
+        write_no_value_poll_and_drain(
+            &write_ch,
+            &mut notify_stream,
+            &mut asm,
+            CMD_FILE_SEND_STATUS,
+            1,
+            "file send status poll (cmd35/1)",
+        )
+        .await?;
+    }
+
     let mut off = 0usize;
     let mut seq: u32 = 1;
+    let max_chunk_writes = 1u32.saturating_add(chunk_write_retries);
     while off < file_data.len() {
         let end = (off + chunk).min(file_data.len());
         let piece = &file_data[off..end];
@@ -1890,16 +2185,20 @@ async fn cmd_upload_dial(
             piece.len(),
             frame.len()
         );
-        gatt_write_fragmented(&write_ch, &frame, gatt_fragment, gatt_fragment_gap_ms)
-            .await
-            .context("write chunk")?;
-        if blind_chunks {
-            tokio::time::sleep(Duration::from_millis(15)).await;
-            if chunk_gap_ms > 0 {
-                tokio::time::sleep(Duration::from_millis(chunk_gap_ms)).await;
+        let mut write_attempt: u32 = 0;
+        loop {
+            write_attempt += 1;
+            gatt_write_fragmented(&write_ch, &frame, gatt_fragment, gatt_fragment_gap_ms)
+                .await
+                .context("write chunk")?;
+            if blind_chunks {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                if chunk_gap_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(chunk_gap_ms)).await;
+                }
+                break;
             }
-        } else {
-            wait_notify_status(
+            match wait_notify_status(
                 &mut notify_stream,
                 &mut asm,
                 1000 + seq as i32,
@@ -1908,7 +2207,18 @@ async fn cmd_upload_dial(
                 use_file34,
                 false,
             )
-            .await?;
+            .await
+            {
+                Ok(()) => break,
+                Err(e) => {
+                    if write_attempt >= max_chunk_writes {
+                        return Err(e);
+                    }
+                    println!(
+                        "  chunk seq={seq} notify timeout (attempt {write_attempt}/{max_chunk_writes}) — resend chunk: {e}"
+                    );
+                }
+            }
         }
         off = end;
         seq += 1;
@@ -2018,6 +2328,10 @@ async fn cmd_probe_upload(
             &[],
             false,
             None,
+            0,
+            1,
+            false,
+            false,
             0,
             100,
             false,
@@ -2750,5 +3064,8 @@ mod tests {
         // getSetInfoByKey(16) => cmd 26, sub 0x10
         let p = get_no_value_protocol(26, 16);
         assert_eq!(&p[..], &[0xCD, 0x00, 0x05, 0x1A, 0x01, 0x10, 0x00, 0x00]);
+        // getFileSendStatus / getReadFileValue(1) => cmd 35, sub 1
+        let f = get_no_value_protocol(CMD_FILE_SEND_STATUS, 1);
+        assert_eq!(&f[..], &[0xCD, 0x00, 0x05, 0x23, 0x01, 0x01, 0x00, 0x00]);
     }
 }
