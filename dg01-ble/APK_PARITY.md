@@ -99,3 +99,11 @@ Decompiled tree: `../superband_jadx_src/sources/` (not always in git). This docu
 | `activity.clockDial.WatchThemeHelper` | UI, downloads, **`startFile`** entry |
 
 This file is descriptive; behaviour in **`dg01-ble`** may intentionally stay smaller than the full app.
+
+---
+
+## 10. Scripted iPhone / APK–style test matrix
+
+For a **repeatable** sequence (link check → DIS/BAS → **`dial-dims`** → **`dial-start-probe`** with **`--preflight-upload2`** → optional full solid upload), run:
+
+`dg01-ble/scripts/run_upload_like_app_tests.sh` (from the **`dg01-ble`** directory, after **`cargo build --release`**). Uses **default DG01 NUS (`7e40…`)** — no **`--apk-uart`**. See script header for **`SKIP_FULL_UPLOAD`**, **`DG01_ADDR`**, etc.
