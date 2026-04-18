@@ -61,8 +61,9 @@ Decompiled tree: `../superband_jadx_src/sources/` (not always in git). This docu
 
 ## 6. Preflight / ordering (app vs capture)
 
-- Real-world successful captures (`--preflight-upload2`) include **time**, **language**, **realtime step**, **dial info**, **DC shorts**, **cmd 26/18** pairs, **weather** fragments — order matters for some firmware builds.
+- Real-world successful captures (`--preflight-upload2`) include **time**, **language**, **realtime step**, **`dial info`**, **DC shorts**, **cmd 26/18** pairs, **weather** fragments — order matters for some firmware builds.
 - **`WeatherProxy`** builds **`getWeatherInfoValue`** / BLE weather blobs (server + location). Not fully replicated except via replay in **`preflight-upload2`**.
+- **Important:** the checked-in **`logs/upload-2.log.pcapng`** matches this preflight **byte-for-byte on NUS TX** but **stops after the weather burst** — it contains **no cmd 31 start, no chunks, no finish**. See **[PROTOCOL.md](../PROTOCOL.md) § PCAP evidence** — expecting an “uploading” UI from **`dial-start-probe`** alone is **not** supported by that capture; run a **full `upload-dial`** (or capture post-weather traffic from the phone app).
 
 ---
 

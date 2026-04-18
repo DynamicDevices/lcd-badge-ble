@@ -98,11 +98,40 @@ cd dg01-ble && cargo run --release -- query --addr 0A:93:79:0C:DD:20 \
   --info-keys 1,10,12,15,16,17,20 --dial-keys 1,2 --disconnect
 ```
 
+## PCAP evidence (`logs/upload-2.log.pcapng`)
+
+Wireshark **`btatt`** decoding works on this file (BlueZ-style capture). **Nordic Sniffer** `.pcapng` files under `third_party/nordic-sniffer/captures/` do **not** expose the same **`btatt`** layer in stock **`tshark`** here (encapsulation differs), so those captures are **not** directly comparable without the Nordic extcap / manual PDU export.
+
+### What is (and is not) in `upload-2`
+
+ATT **Write Command/Request** payloads to the NUS TX handle (**`0x002f`** in that trace) appear in this **exact order**:
+
+1. Time sync (`0xCD` settings / sync-time style blob — `cd 00 09 12 01 01 …`).
+2. **`SwitchProtocol`** language (`cd 00 06 12 01 15 00 01 01`).
+3. **`SwitchProtocol`** realtime step (`cd 00 06 15 01 06 00 01 01`).
+4. **`getNoValueProtocol(32,2)`** dial clock info (`cd 00 05 20 01 02 00 00`).
+5. Two fixed **`0xDC`** shorts (`dc 00 05 15 0c …`, `dc 00 05 20 02 …`).
+6. **`SwitchProtocol(18,10,1)`** classic-BT key (`cd 00 06 12 01 0a 00 01 01`).
+7. **Fifteen** repeats of **`getNoValueProtocol(32,3)`** (`cd 00 05 20 01 03 00 00`) — same count as **`dg01-ble`** `PREFLIGHT_UPLOAD2` / **`DIAL3_REPEAT`**.
+8. Third **`0xDC`** short (`dc 00 05 20 03 00 12 01`).
+9. **Three** ATT segments of the **`getWeatherInfoValue`** burst (`cd 00 4d 12 01 20 …` + continuations).
+
+**After the third weather segment, this PCAP has no further NUS TX writes** — in particular **no `cmd 31` dial start**, **no file chunks**, and **no finish**. So the file documents **preflight only**, not the in-app **“uploading”** phase. That matches why **`--preflight-upload2`** alone (or **`--dial-start-probe`** right after it) may produce **no visible UI change**: the capture never contained the **post-weather** behaviour the phone showed in a longer session.
+
+### APK vs this iPhone trace
+
+The **FitPro / SuperBand Android** APK uses the same **`0xCD`** framing but NUS UUIDs **`6e40…`** (`Profile.java`); the **DG01** exposes **`7e40…`** (see **`gatt_dump_dg01.txt`**). Payloads should still match if the OEM stack is shared; differences are more likely in **ordering**, **optional** steps (extra **`cmd 26`** keys, **`cmd 32/1`** polls), or **weather / location** blobs than in the UART UUID.
+
+### Why the badge may stay on the normal face during our tests
+
+1. **No image phase in `upload-2`** — UI may switch only after **dial start ACK** and often **first chunk** (firmware-dependent); **`dial-start-probe`** sends **no chunks**.
+2. **Alternate bulk path (unverified)** — **`gatt_dump_dg01.txt`** also lists **`00003802` / `00004a02`** and **`0000aa00` / `0000aa01`**. If stock firmware routes **watchface bulk** away from NUS, **NUS-only** tools would never match the app’s UI path (needs a capture of **which handle** receives bulk writes).
+
 ## Hypotheses for image / video upload
 
 1. **Chunked writes** to one of: **`4A02`**, **`AA01`**, **`AE01`**, and/or **NUS `7e400002` / `7e400003`** (with notifications on the paired notify characteristics).
 2. **App** likely **precompresses** (e.g. RGB565 / raw frames / vendor container), not raw video over BLE.
-3. **Next evidence:** HCI capture (Android **btsnoop** or **nRF Sniffer**) while the official app performs one **image send** — identify which **handle** receives the bulk writes.
+3. **Next evidence:** HCI capture (Android **btsnoop** or **nRF Sniffer**) that includes **cmd 31 start through at least one chunk** — identify which **handle** receives the bulk writes. **`upload-2`** alone is **insufficient** (preflight + weather only).
 
 ## Tools in this repo
 
