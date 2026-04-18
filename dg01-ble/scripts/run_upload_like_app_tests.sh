@@ -79,7 +79,8 @@ run_ok "A1 — Device Information + Battery (BAS %)" \
 
 # --- Phase B: vendor UART sanity (same NUS as upload) ---
 run_ok "B1 — Dial dimensions (cmd 32/2 — APK getDialClockInfo)" \
-  dial-dims --addr "$DG01_ADDR" --disconnect --notify-settle-ms 250
+  dial-dims --addr "$DG01_ADDR" --disconnect --notify-settle-ms 250 \
+  --response-timeout-ms 15000
 
 # --- Phase C: “uploading” UI without moving full image (start frame + 10s notify drain) ---
 # Matches iPhone capture order: --preflight-upload2 (see APK_PARITY.md §6).
