@@ -9,10 +9,9 @@ the vendor scratch buffer for typical sizes (see scratch_bytes()).
 Optional **native** backend loads jni/x86_64/libjl_bmp_convert.so and calls ETC2CompressRawData.
 That library is built for Android (Bionic); on desktop Linux, dlopen usually fails — use etcpak.
 
-CRC16 matches the vendor routine using a **512-byte nibble table** (256 × uint16 LE), shipped as
-**`ru50_crc16_table.bin`** next to this script (extracted once from BmpConvert 1.6.0 x86_64 for
-compatibility). Override the path with **`--crc-table`**. There is **no** read from the vendor
-`.so` for CRC — **`--so`** is only for the optional **native** compressor backend.
+CRC16 matches the vendor routine using a **512-byte nibble table** (256 × uint16 LE) embedded
+in this script (BmpConvert 1.6.0 x86_64 `.rodata` @ 0x9460). Pass **`--crc-table PATH`** to use
+another 512-byte file instead. **`--so`** is only for the optional **native** compressor backend.
 
 See ../decompile/ENCODER_SPEC.md for format notes.
 """
@@ -39,6 +38,24 @@ HDR_QW_30 = 0x5000000100
 HDR_DW_38 = 0x400
 HDR_FLAGS = 0x00920001
 
+# Vendor Crc16 nibble table — BmpConvert 1.6.0 x86_64 (.rodata 0x9460); 256 × uint16 LE.
+_CRC16_TABLE_EMBEDDED: bytes = bytes.fromhex(
+    "00002110422063308440a550c660e770088129914aa16bb18cc1add1cee1eff1020000000300"
+    "00000100000000000000f8fffffffeffffff0200000008000000f8fffffffeffffff02000000"
+    "08000000effffffffbffffff0500000011000000effffffffbffffff0500000011000000e3ff"
+    "fffff7ffffff090000001d000000e3fffffff7ffffff090000001d000000d6fffffff3ffffff"
+    "0d0000002a000000d6fffffff3ffffff0d0000002a000000c4ffffffeeffffff120000003c00"
+    "0000c4ffffffeeffffff120000003c000000b0ffffffe8ffffff1800000050000000b0ffffff"
+    "e8ffffff180000005000000096ffffffdfffffff210000006a00000096ffffffdfffffff2100"
+    "00006a00000049ffffffd1ffffff2f000000b700000049ffffffd1ffffff2f000000b7000000"
+    "00000101ffffffff00004043000088418716993e08080808727272720000003fc39d0b3d0e0e"
+    "0e0ec0803e4aaeb9333ed578e93d040404040000803da245163fe79c03414e0c893d1e1e1e1e"
+    "ffff0000023c01005a3c01003d3c01009d3c0100623c0100b33c0100773c0100023c0100453f"
+    "01001d3f0100253f0100433f01002f3f0100353f01003d3f01002d3f01002042010037420100"
+    "244201004d420100314201003f420100474201002e42010020450100f8440100004501001e45"
+    "01000a450100104501001845010008450100"
+)
+
 
 def _script_dir() -> Path:
     return Path(__file__).resolve().parent
@@ -46,10 +63,6 @@ def _script_dir() -> Path:
 
 def _default_so() -> Path:
     return _script_dir().parent / "jni" / "x86_64" / "libjl_bmp_convert.so"
-
-
-def _default_crc_table_bin() -> Path:
-    return _script_dir() / "ru50_crc16_table.bin"
 
 
 def _read_crc_table_file(path: Path) -> bytes:
@@ -61,18 +74,12 @@ def _read_crc_table_file(path: Path) -> bytes:
 
 
 def load_crc_table(crc_table: Path | None) -> bytes:
-    """Load 512-byte CRC table: explicit ``--crc-table`` else ``ru50_crc16_table.bin`` beside this script."""
+    """512-byte CRC table: ``--crc-table`` file or embedded vendor table."""
     if crc_table is not None:
         if not crc_table.is_file():
             raise FileNotFoundError(f"--crc-table not found: {crc_table}")
         return _read_crc_table_file(crc_table)
-    bundled = _default_crc_table_bin()
-    if bundled.is_file():
-        return _read_crc_table_file(bundled)
-    raise FileNotFoundError(
-        "CRC table required: place ru50_crc16_table.bin next to this script, "
-        "or pass --crc-table PATH (512 bytes, 256 little-endian uint16s)."
-    )
+    return _CRC16_TABLE_EMBEDDED
 
 
 def crc16_sw(data: bytes, table: bytes) -> int:
@@ -211,7 +218,7 @@ def main() -> None:
         "--crc-table",
         type=Path,
         default=None,
-        help="512-byte CRC nibble table (default: ru50_crc16_table.bin beside this script)",
+        help="512-byte CRC nibble table file (default: built-in vendor table)",
     )
     p.add_argument(
         "--so",
