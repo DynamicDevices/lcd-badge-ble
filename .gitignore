@@ -11,6 +11,11 @@ __pycache__/
 *.apk
 superband_jadx_src/
 tools/
+# Keep bmpconvert RU50 helper scripts (under third_party, not repo-root tools/)
+!third_party/bmpconvert_extract/tools/
+!third_party/bmpconvert_extract/tools/**
+third_party/bmpconvert_extract/tools/ru50-venv/
+third_party/bmpconvert_extract/tools/.venv-ru50/
 
 # BLE captures and download scratch
 *.btsnoop
