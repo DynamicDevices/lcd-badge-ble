@@ -188,7 +188,7 @@ pub fn file34_file_frame(seq: u16, chunk: &[u8]) -> Vec<u8> {
     uart_file_chunk(CMD_FILE_UART, seq, chunk)
 }
 
-/// `getFileStartValue`: 8-byte len+sum payload, cmd **34** sub **2** (`BleFileSendTools.sendStartCmd`).
+/// `calculateFinishCheckcode`: 4-byte BE sum-only payload for cmd31/sub3 finish frame. Discovered via iOS sysdiagnose capture — device expects checksum only, not length+checksum..
 pub fn file34_start(file: &[u8]) -> Vec<u8> {
     let len = file.len() as u32;
     let sum: u32 = file.iter().map(|&b| u32::from(b)).sum();
@@ -197,6 +197,15 @@ pub fn file34_start(file: &[u8]) -> Vec<u8> {
     pl.extend_from_slice(&sum.to_be_bytes());
     get_protocol(CMD_FILE_UART, 2, &pl)
 }
+
+/// `calculateFinishCheckcode`: 4-byte BE sum-only payload for cmd31/sub3 finish frame. Discovered via iOS sysdiagnose capture — device expects checksum only, not length+checksum..
+pub fn dial_finish_payload(file: &[u8]) -> Vec<u8> {
+    let sum: u32 = file.iter().map(|&b| u32::from(b)).sum();
+    let mut tail = Vec::with_capacity(4);
+    tail.extend_from_slice(&sum.to_be_bytes());
+    get_protocol(CMD_DIAL_TRANSFER, SUB_DIAL_FINISH, &tail)
+}
+
 
 /// `getFileFinishValue` — `getNoValueProtocol(34, 3)`.
 pub fn file34_finish_frame() -> Vec<u8> {
@@ -220,15 +229,7 @@ fn checksum_seq_and_chunk(seq_plus_chunk: &[u8]) -> [u8; 2] {
     s.to_be_bytes()
 }
 
-/// `calculateFinishCheckcode`: BE file length + BE sum of all file bytes (Java `int` sum; fits watchface sizes).
-pub fn dial_finish_payload(file: &[u8]) -> Vec<u8> {
-    let len = file.len() as u32;
-    let sum: u32 = file.iter().map(|&b| u32::from(b)).sum();
-    let mut tail = Vec::with_capacity(8);
-    tail.extend_from_slice(&len.to_be_bytes());
-    tail.extend_from_slice(&sum.to_be_bytes());
-    get_protocol(CMD_DIAL_TRANSFER, SUB_DIAL_FINISH, &tail)
-}
+
 
 /// First 4 bytes of **payload** (after 8-byte `0xCD` header) as big-endian int — `BaseReceiveData.parseDialUpCode` / `NumberUtils.bytes2int`.
 /// Short **`0xDC`** notify (`BaseReceiveData` first branch) — 8-byte frames, not merged with `0xCD`.
@@ -370,10 +371,12 @@ pub fn parse_dial_clock_info_full(packet: &[u8]) -> Option<DialClockInfoParsed> 
 
 /// Some firmware ACKs dial **start** with **`0xCD`** cmd **0x15** sub **0x0c** (seen after `--preflight-upload2`), not cmd **31** status **1000**.
 pub fn is_dial_start_banner_cd(packet: &[u8]) -> bool {
-    packet.first().copied() == Some(0xCD)
-        && packet.len() >= 8
-        && packet.get(3).copied() == Some(0x15)
-        && packet.get(5).copied() == Some(0x0c)
+    if packet.first().copied() != Some(0xCD) || packet.len() < 8 {
+        return false;
+    }
+    let cmd = packet.get(3).copied().unwrap_or(0);
+    let sub = packet.get(5).copied().unwrap_or(0);
+    (cmd == 0x15 && sub == 0x0c) || (cmd == 0x20 && sub == 0x01)
 }
 
 /// Match `WatchThemeTools.getNotHeaderBmp`: keep last `width * height * 2` bytes (RGB565 body).

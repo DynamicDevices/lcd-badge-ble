@@ -1181,6 +1181,11 @@ async fn cmd_query(
         })?
         .context("notify()")?;
     pin_mut!(notify_stream);
+    // Also subscribe to 7e400004 (secondary NUS notify) — iPhone app enables this CCCD too
+    let extra_notify_uuid = Uuid::parse_str("7e400004-b5a3-f393-e0a9-e50e24dcca9d").unwrap();
+    if let Ok(Some(extra_ch)) = find_characteristic(&device, extra_notify_uuid).await.map(Some).or_else(|_| Ok::<_, anyhow::Error>(None)) {
+        let _ = tokio::time::timeout(NOTIFY_ENABLE_TIMEOUT, extra_ch.notify()).await;
+    }
 
     let wait = Duration::from_millis(response_timeout_ms);
     let gap = Duration::from_millis(gap_ms);
@@ -1502,6 +1507,9 @@ where
             if cmd == CMD_DIAL_TRANSFER && sub == SUB_DIAL_FINISH && want == 2 {
                 return Ok(());
             }
+	    if cmd == 0 && (want == 1000 || sub as i32 == want -1000) {
+		return Ok(());
+	    }
         }
         for pkt in asm.push(&data) {
             if want == 1000 && loose_start_banner && is_dial_start_banner_cd(&pkt) {
