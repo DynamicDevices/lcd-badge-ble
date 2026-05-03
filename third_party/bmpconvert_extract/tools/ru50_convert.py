@@ -9,10 +9,10 @@ the vendor scratch buffer for typical sizes (see scratch_bytes()).
 Optional **native** backend loads jni/x86_64/libjl_bmp_convert.so and calls ETC2CompressRawData.
 That library is built for Android (Bionic); on desktop Linux, dlopen usually fails — use etcpak.
 
-CRC16 matches the vendor routine using a **512-byte nibble table** (256 × uint16 LE). By default
-the table is loaded from **`ru50_crc16_table.bin`** next to this script (same bytes as offset
-**0x9460** in `libjl_bmp_convert.so` BmpConvert 1.6.0 x86_64). Override with **`--crc-table`**, or
-omit the bundled file and fall back to reading from **`--so`**.
+CRC16 matches the vendor routine using a **512-byte nibble table** (256 × uint16 LE), shipped as
+**`ru50_crc16_table.bin`** next to this script (extracted once from BmpConvert 1.6.0 x86_64 for
+compatibility). Override the path with **`--crc-table`**. There is **no** read from the vendor
+`.so` for CRC — **`--so`** is only for the optional **native** compressor backend.
 
 See ../decompile/ENCODER_SPEC.md for format notes.
 """
@@ -60,18 +60,8 @@ def _read_crc_table_file(path: Path) -> bytes:
     return t
 
 
-def _crc_table_from_so(so_path: Path) -> bytes:
-    """512-byte CRC table at file offset 0x9460 (x86_64 BmpConvert 1.6.0)."""
-    with so_path.open("rb") as f:
-        f.seek(0x9460)
-        t = f.read(512)
-    if len(t) != 512:
-        raise OSError(f"Could not read 512-byte CRC table from {so_path}")
-    return t
-
-
-def load_crc_table(crc_table: Path | None, so_path: Path) -> bytes:
-    """Resolve 512-byte CRC table: explicit path → bundled bin → vendor .so @0x9460."""
+def load_crc_table(crc_table: Path | None) -> bytes:
+    """Load 512-byte CRC table: explicit ``--crc-table`` else ``ru50_crc16_table.bin`` beside this script."""
     if crc_table is not None:
         if not crc_table.is_file():
             raise FileNotFoundError(f"--crc-table not found: {crc_table}")
@@ -79,12 +69,9 @@ def load_crc_table(crc_table: Path | None, so_path: Path) -> bytes:
     bundled = _default_crc_table_bin()
     if bundled.is_file():
         return _read_crc_table_file(bundled)
-    if so_path.is_file():
-        return _crc_table_from_so(so_path)
     raise FileNotFoundError(
-        "No CRC table source: ship ru50_crc16_table.bin beside this script, "
-        "or pass --crc-table PATH, or place the vendor library at "
-        f"{so_path} (jni/x86_64 from BmpConvert AAR)."
+        "CRC table required: place ru50_crc16_table.bin next to this script, "
+        "or pass --crc-table PATH (512 bytes, 256 little-endian uint16s)."
     )
 
 
@@ -224,13 +211,13 @@ def main() -> None:
         "--crc-table",
         type=Path,
         default=None,
-        help="512-byte CRC nibble table (default: ru50_crc16_table.bin beside this script, else .so @0x9460)",
+        help="512-byte CRC nibble table (default: ru50_crc16_table.bin beside this script)",
     )
     p.add_argument(
         "--so",
         type=Path,
         default=_default_so(),
-        help="Path to libjl_bmp_convert.so (native backend only; CRC fallback if no bundled crc table)",
+        help="Path to libjl_bmp_convert.so (required only for --backend native)",
     )
     args = p.parse_args()
 
@@ -244,7 +231,7 @@ def main() -> None:
         )
 
     try:
-        table = load_crc_table(args.crc_table, args.so)
+        table = load_crc_table(args.crc_table)
     except OSError as e:
         p.error(str(e))
     im = Image.open(args.input)
