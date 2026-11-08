@@ -128,8 +128,8 @@ enum Command {
         /// Path to a 240x240 JPEG file
         #[arg(long)]
         file: PathBuf,
-        /// Use ATT Write Requests (with response) instead of Write Commands
-        #[arg(long)]
+        // Accepted for compatibility with earlier BG02 upload commands.
+        #[arg(long, hide = true)]
         write_with_response: bool,
         /// Print received BLE notifications and upload status codes
         #[arg(long)]
@@ -606,10 +606,10 @@ async fn main() -> anyhow::Result<()> {
         Command::UploadBg02Jpeg {
             addr,
             file,
-            write_with_response,
             verbose,
+            ..
         } => {
-            bg02_jpeg::upload(&adapter, &addr, &file, write_with_response, verbose).await?;
+            bg02_jpeg::upload(&adapter, &addr, &file, verbose).await?;
         }
         Command::Find {
             addr,

@@ -29,13 +29,7 @@ const GATT_FRAGMENT_SIZE: usize = 20;
 const GATT_FRAGMENT_GAP_MS: u64 = 3;
 const STATUS_TIMEOUT: Duration = Duration::from_secs(15);
 
-pub async fn upload(
-    adapter: &Adapter,
-    addr: &str,
-    path: &Path,
-    write_with_response: bool,
-    verbose: bool,
-) -> Result<()> {
+pub async fn upload(adapter: &Adapter, addr: &str, path: &Path, verbose: bool) -> Result<()> {
     let jpeg = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let payload = jpeg_payload(&jpeg)?;
     let device =
@@ -49,15 +43,7 @@ pub async fn upload(
         let rx = find_characteristic(&device, DEFAULT_NOTIFY_UUID.parse()?)
             .await
             .context("resolve BG02 notify characteristic")?;
-        let writer = UploadWriter {
-            tx: &tx,
-            op: if write_with_response {
-                WriteOp::Request
-            } else {
-                WriteOp::Command
-            },
-            verbose,
-        };
+        let writer = UploadWriter { tx: &tx, verbose };
         writer.send_payload(&rx, &payload).await
     }
     .await;
@@ -108,14 +94,13 @@ fn notify_ack(packet: &[u8]) -> Option<[u8; 8]> {
 
 struct UploadWriter<'a> {
     tx: &'a Characteristic,
-    op: WriteOp,
     verbose: bool,
 }
 
 impl UploadWriter<'_> {
     async fn write(&self, frame: &[u8]) -> Result<()> {
         let request = CharacteristicWriteRequest {
-            op_type: self.op,
+            op_type: WriteOp::Request,
             ..Default::default()
         };
         tokio::time::timeout(GATT_WRITE_TIMEOUT, async {
@@ -145,9 +130,8 @@ impl UploadWriter<'_> {
 
         let chunk_count = payload.len().div_ceil(CHUNK_SIZE);
         println!(
-            "BG02 upload: {} bytes in {chunk_count} chunk(s), ATT {}",
-            payload.len(),
-            self.op
+            "BG02 upload: {} bytes in {chunk_count} chunk(s), ATT request",
+            payload.len()
         );
         self.write(&start_frame(payload.len() as u32))
             .await

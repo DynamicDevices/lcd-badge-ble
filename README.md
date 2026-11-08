@@ -36,9 +36,9 @@ cargo run --release -- scan --seconds 15
 cargo run --release -- upload-bg02-jpeg --addr AA:BB:CC:DD:EE:FF --file photo.jpg
 ```
 
-If the transfer times out, add `--verbose` to show the received notifications
-and status codes. Use `--write-with-response` to try ATT Write Requests when
-the default Write Commands stall after the start response.
+The uploader uses ATT Write Requests so each BLE write receives a response.
+Earlier commands that include `--write-with-response` are still accepted.
+Add `--verbose` to show the received notifications and status codes.
 
 ## BlueZ connect / disconnect (Linux)
 
