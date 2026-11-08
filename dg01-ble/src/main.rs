@@ -23,6 +23,7 @@
 //! cd dg01-ble && cargo run --release -- disconnect --addr 0A:93:79:0C:DD:20
 //! ```
 
+mod bg02_jpeg;
 mod dial_upload;
 mod device_info_gatt;
 
@@ -119,6 +120,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Upload a 240x240 JPEG to a BG02 with the V35922 JPEG protocol
+    UploadBg02Jpeg {
+        /// BLE address of the badge
+        #[arg(long)]
+        addr: String,
+        /// Path to a 240x240 JPEG file
+        #[arg(long)]
+        file: PathBuf,
+        // Accepted for compatibility with earlier BG02 upload commands.
+        #[arg(long, hide = true)]
+        write_with_response: bool,
+        /// Print received BLE notifications and upload status codes
+        #[arg(long)]
+        verbose: bool,
+    },
     /// Send "find device" (flash colours / alert on the badge)
     Find {
         /// Peripheral MAC, e.g. 0A:93:79:0C:DD:20
@@ -587,6 +603,14 @@ async fn main() -> anyhow::Result<()> {
     adapter.set_powered(true).await.context("set_powered")?;
 
     match cli.command {
+        Command::UploadBg02Jpeg {
+            addr,
+            file,
+            verbose,
+            ..
+        } => {
+            bg02_jpeg::upload(&adapter, &addr, &file, verbose).await?;
+        }
         Command::Find {
             addr,
             write_uuid,

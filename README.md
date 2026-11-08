@@ -17,6 +17,32 @@ BLE tooling and protocol / reverse-engineering notes for **DG01**-class LCD pins
 
 - **dg01-ble:** Rust toolchain, Bluetooth adapter managed by BlueZ (typical Linux desktop / Pi).
 
+## BG02 JPEG upload (240×240)
+
+`upload-bg02-jpeg` implements the JPEG transfer profile reported for BG02
+`LJ733_MB_V1.5` / firmware `V35922`. The
+[capture and successful Linux reference upload](https://github.com/DynamicDevices/lcd-badge-ble/issues/2#issuecomment-6499084532)
+used SuperBand 2.1.25 and a modified Python client. On this BG02 profile, the Rust
+uploader completed three transfers of the same JPEG, and the image was confirmed
+on the display after the first transfer. The existing `upload-dial` command covers
+the other transfer paths.
+
+Disconnect SuperBand, use `scan` to find the BLE address if needed, and supply
+a 240×240 JPEG. The command sends the original JPEG bytes and waits for status
+`2` before reporting success.
+
+```sh
+cd dg01-ble
+cargo run --release -- scan --seconds 15
+cargo run --release -- upload-bg02-jpeg --addr AA:BB:CC:DD:EE:FF --file photo.jpg
+```
+
+The uploader uses ATT Write Requests so each BLE write receives a response.
+Earlier commands that include `--write-with-response` are still accepted.
+Add `--verbose` to show the received notifications and status codes.
+If the badge is already connected in BlueZ, the uploader uses that connection
+and leaves it open when the transfer ends.
+
 ## BlueZ connect / disconnect (Linux)
 
 The **`connect`** and **`disconnect`** subcommands use the same D-Bus methods as the Ubuntu **Bluetooth** settings toggle: **`org.bluez.Device1.Connect`** and **`Disconnect`** (via [bluer](https://github.com/bluez/bluer), same path as `bluetoothctl`). Before connect, the tool sets **`Trusted=true`** when BlueZ allows it (helps **unpaired** LE peripherals — the panel shows **Paired: No** for some devices).
