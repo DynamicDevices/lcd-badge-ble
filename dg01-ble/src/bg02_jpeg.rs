@@ -20,8 +20,9 @@ use crate::dial_upload::{
 };
 use crate::{
     connect_ble_device, device_disconnect_best_effort, find_characteristic, get_protocol, hex,
-    wait_gatt_ready_for_upload, BLE_CONNECT_TIMEOUT, DEFAULT_NOTIFY_UUID, DEFAULT_WRITE_UUID,
-    GATT_WRITE_TIMEOUT, NOTIFY_ENABLE_TIMEOUT,
+    wait_gatt_ready_for_upload, warm_scan_le_if_unseen, BLE_CONNECT_TIMEOUT,
+    BLE_IS_CONNECTED_TIMEOUT, DEFAULT_NOTIFY_UUID, DEFAULT_WRITE_UUID, GATT_WRITE_TIMEOUT,
+    NOTIFY_ENABLE_TIMEOUT,
 };
 
 const CHUNK_SIZE: usize = 5000;
@@ -32,8 +33,23 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(15);
 pub async fn upload(adapter: &Adapter, addr: &str, path: &Path, verbose: bool) -> Result<()> {
     let jpeg = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let payload = jpeg_payload(&jpeg)?;
-    let device =
-        connect_ble_device(adapter, addr, false, 10, false, BLE_CONNECT_TIMEOUT, None).await?;
+    let address = addr
+        .parse()
+        .with_context(|| format!("invalid BLE address: {addr}"))?;
+    warm_scan_le_if_unseen(adapter, address, 10).await?;
+    let device = adapter.device(address).context("resolve BG02 device")?;
+    let already_connected = tokio::time::timeout(BLE_IS_CONNECTED_TIMEOUT, device.is_connected())
+        .await
+        .context("timed out checking the BG02 connection")?
+        .context("check the BG02 connection")?;
+    let device = if already_connected {
+        println!("Reusing existing BlueZ connection to {address}.");
+        device
+    } else {
+        connect_ble_device(adapter, addr, false, 0, false, BLE_CONNECT_TIMEOUT, None)
+            .await
+            .context("connect to BG02 (if needed, connect first with dg01-ble connect)")?
+    };
 
     let result = async {
         wait_gatt_ready_for_upload(&device).await;
@@ -48,7 +64,9 @@ pub async fn upload(adapter: &Adapter, addr: &str, path: &Path, verbose: bool) -
     }
     .await;
 
-    device_disconnect_best_effort(&device).await;
+    if !already_connected {
+        device_disconnect_best_effort(&device).await;
+    }
     result
 }
 

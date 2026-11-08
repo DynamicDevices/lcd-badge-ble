@@ -39,6 +39,8 @@ cargo run --release -- upload-bg02-jpeg --addr AA:BB:CC:DD:EE:FF --file photo.jp
 The uploader uses ATT Write Requests so each BLE write receives a response.
 Earlier commands that include `--write-with-response` are still accepted.
 Add `--verbose` to show the received notifications and status codes.
+If the badge is already connected in BlueZ, the uploader uses that connection
+and leaves it open when the transfer ends.
 
 ## BlueZ connect / disconnect (Linux)
 
