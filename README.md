@@ -22,9 +22,10 @@ BLE tooling and protocol / reverse-engineering notes for **DG01**-class LCD pins
 `upload-bg02-jpeg` implements the JPEG transfer profile reported for BG02
 `LJ733_MB_V1.5` / firmware `V35922`. The
 [capture and successful Linux reference upload](https://github.com/DynamicDevices/lcd-badge-ble/issues/2#issuecomment-6499084532)
-used SuperBand 2.1.25 and a modified Python client. The Rust port still needs an
-on-device test. Use this command for that profile; the existing `upload-dial`
-command covers the other transfer paths.
+used SuperBand 2.1.25 and a modified Python client. On this BG02 profile, the Rust
+uploader completed three transfers of the same JPEG, and the image was confirmed
+on the display after the first transfer. The existing `upload-dial` command covers
+the other transfer paths.
 
 Disconnect SuperBand, use `scan` to find the BLE address if needed, and supply
 a 240×240 JPEG. The command sends the original JPEG bytes and waits for status
