@@ -4,18 +4,24 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use bluer::{gatt::remote::Characteristic, Adapter};
+use bluer::{
+    gatt::{
+        remote::{Characteristic, CharacteristicWriteRequest},
+        WriteOp,
+    },
+    Adapter,
+};
 use futures::{pin_mut, Stream, StreamExt};
 
 use crate::dial_upload::{
     dial_finish_payload, dial_start_extended, is_watch_theme_fatal_protocol_status,
-    parse_cd_notify_status, watch_theme_protocol_error_message, CdNotifyAssembler, CMD_DIAL_NOTIFY,
-    CMD_DIAL_TRANSFER, SUB_DIAL_FILE, SUB_DIAL_NOTIFY_FILE,
+    parse_dial_watch_ack_status, watch_theme_protocol_error_message, CdNotifyAssembler,
+    CMD_DIAL_TRANSFER, SUB_DIAL_FILE,
 };
 use crate::{
-    connect_ble_device, device_disconnect_best_effort, find_characteristic, gatt_write_fragmented,
-    get_protocol, wait_gatt_ready_for_upload, BLE_CONNECT_TIMEOUT, DEFAULT_NOTIFY_UUID,
-    DEFAULT_WRITE_UUID, GATT_WRITE_TIMEOUT, NOTIFY_ENABLE_TIMEOUT,
+    connect_ble_device, device_disconnect_best_effort, find_characteristic, get_protocol, hex,
+    wait_gatt_ready_for_upload, BLE_CONNECT_TIMEOUT, DEFAULT_NOTIFY_UUID, DEFAULT_WRITE_UUID,
+    GATT_WRITE_TIMEOUT, NOTIFY_ENABLE_TIMEOUT,
 };
 
 const CHUNK_SIZE: usize = 5000;
@@ -23,7 +29,13 @@ const GATT_FRAGMENT_SIZE: usize = 20;
 const GATT_FRAGMENT_GAP_MS: u64 = 3;
 const STATUS_TIMEOUT: Duration = Duration::from_secs(15);
 
-pub async fn upload(adapter: &Adapter, addr: &str, path: &Path) -> Result<()> {
+pub async fn upload(
+    adapter: &Adapter,
+    addr: &str,
+    path: &Path,
+    write_with_response: bool,
+    verbose: bool,
+) -> Result<()> {
     let jpeg = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let payload = jpeg_payload(&jpeg)?;
     let device =
@@ -37,7 +49,16 @@ pub async fn upload(adapter: &Adapter, addr: &str, path: &Path) -> Result<()> {
         let rx = find_characteristic(&device, DEFAULT_NOTIFY_UUID.parse()?)
             .await
             .context("resolve BG02 notify characteristic")?;
-        send_payload(&tx, &rx, &payload).await
+        let writer = UploadWriter {
+            tx: &tx,
+            op: if write_with_response {
+                WriteOp::Request
+            } else {
+                WriteOp::Command
+            },
+            verbose,
+        };
+        writer.send_payload(&rx, &payload).await
     }
     .await;
 
@@ -85,82 +106,109 @@ fn notify_ack(packet: &[u8]) -> Option<[u8; 8]> {
     Some([0xdc, 0, 5, cmd, sub, high, low, 1])
 }
 
-async fn write(tx: &Characteristic, frame: &[u8]) -> Result<()> {
-    tokio::time::timeout(
-        GATT_WRITE_TIMEOUT,
-        gatt_write_fragmented(tx, frame, GATT_FRAGMENT_SIZE, GATT_FRAGMENT_GAP_MS),
-    )
-    .await
-    .context("BG02 GATT write timed out")?
+struct UploadWriter<'a> {
+    tx: &'a Characteristic,
+    op: WriteOp,
+    verbose: bool,
 }
 
-async fn send_payload(tx: &Characteristic, rx: &Characteristic, payload: &[u8]) -> Result<()> {
-    let stream = tokio::time::timeout(NOTIFY_ENABLE_TIMEOUT, rx.notify())
+impl UploadWriter<'_> {
+    async fn write(&self, frame: &[u8]) -> Result<()> {
+        let request = CharacteristicWriteRequest {
+            op_type: self.op,
+            ..Default::default()
+        };
+        tokio::time::timeout(GATT_WRITE_TIMEOUT, async {
+            for (index, fragment) in frame.chunks(GATT_FRAGMENT_SIZE).enumerate() {
+                if index > 0 {
+                    tokio::time::sleep(Duration::from_millis(GATT_FRAGMENT_GAP_MS)).await;
+                }
+                self.tx
+                    .write_ext(fragment, &request)
+                    .await
+                    .with_context(|| format!("write BG02 GATT fragment {}", index + 1))?;
+            }
+            Ok(())
+        })
         .await
-        .context("BG02 notify subscribe timed out")?
-        .context("subscribe to BG02 notifications")?;
-    pin_mut!(stream);
-    let mut assembler = CdNotifyAssembler::default();
-    tokio::time::sleep(Duration::from_millis(250)).await;
-
-    write(tx, &start_frame(payload.len() as u32))
-        .await
-        .context("send start")?;
-    wait_status(tx, &mut stream, &mut assembler, 1000).await?;
-    let chunk_count = payload.len().div_ceil(CHUNK_SIZE);
-    for (index, chunk) in payload.chunks(CHUNK_SIZE).enumerate() {
-        let seq = (index + 1) as u16;
-        write(tx, &chunk_frame(seq, chunk))
-            .await
-            .with_context(|| format!("send chunk {seq}/{chunk_count}"))?;
-        wait_status(tx, &mut stream, &mut assembler, 1000 + i32::from(seq)).await?;
-        println!("BG02 acknowledged chunk {seq}/{chunk_count}");
+        .context("BG02 GATT write timed out")?
     }
-    write(tx, &dial_finish_payload(payload))
-        .await
-        .context("send finish")?;
-    wait_status(tx, &mut stream, &mut assembler, 2).await?;
-    println!("BG02 reported upload success (status 2).");
-    Ok(())
-}
 
-async fn wait_status(
-    tx: &Characteristic,
-    stream: &mut (impl Stream<Item = Vec<u8>> + Unpin),
-    assembler: &mut CdNotifyAssembler,
-    expected: i32,
-) -> Result<()> {
-    tokio::time::timeout(STATUS_TIMEOUT, async {
-        while let Some(data) = stream.next().await {
-            let mut matched = false;
-            for packet in assembler.push(&data) {
-                if let Some(ack) = notify_ack(&packet) {
-                    write(tx, &ack)
-                        .await
-                        .context("acknowledge BG02 notification")?;
-                }
-                if packet.get(3) != Some(&CMD_DIAL_NOTIFY)
-                    || packet.get(5) != Some(&SUB_DIAL_NOTIFY_FILE)
-                {
-                    continue;
-                }
-                if let Some(status) = parse_cd_notify_status(&packet) {
-                    if is_watch_theme_fatal_protocol_status(status) {
-                        let detail =
-                            watch_theme_protocol_error_message(status).unwrap_or("upload failed");
-                        bail!("BG02 reported status {status}: {detail}");
-                    }
-                    matched |= status == expected;
-                }
-            }
-            if matched {
-                return Ok(());
-            }
+    async fn send_payload(&self, rx: &Characteristic, payload: &[u8]) -> Result<()> {
+        let stream = tokio::time::timeout(NOTIFY_ENABLE_TIMEOUT, rx.notify())
+            .await
+            .context("BG02 notify subscribe timed out")?
+            .context("subscribe to BG02 notifications")?;
+        pin_mut!(stream);
+        let mut assembler = CdNotifyAssembler::default();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let chunk_count = payload.len().div_ceil(CHUNK_SIZE);
+        println!(
+            "BG02 upload: {} bytes in {chunk_count} chunk(s), ATT {}",
+            payload.len(),
+            self.op
+        );
+        self.write(&start_frame(payload.len() as u32))
+            .await
+            .context("send start")?;
+        self.wait_status(&mut stream, &mut assembler, 1000).await?;
+        for (index, chunk) in payload.chunks(CHUNK_SIZE).enumerate() {
+            let seq = (index + 1) as u16;
+            self.write(&chunk_frame(seq, chunk))
+                .await
+                .with_context(|| format!("send chunk {seq}/{chunk_count}"))?;
+            self.wait_status(&mut stream, &mut assembler, 1000 + i32::from(seq))
+                .await?;
+            println!("BG02 acknowledged chunk {seq}/{chunk_count}");
         }
-        bail!("BG02 notification stream ended while waiting for status {expected}");
-    })
-    .await
-    .with_context(|| format!("timed out waiting for BG02 status {expected}"))?
+        self.write(&dial_finish_payload(payload))
+            .await
+            .context("send finish")?;
+        self.wait_status(&mut stream, &mut assembler, 2).await?;
+        println!("BG02 reported upload success (status 2).");
+        Ok(())
+    }
+
+    async fn wait_status(
+        &self,
+        stream: &mut (impl Stream<Item = Vec<u8>> + Unpin),
+        assembler: &mut CdNotifyAssembler,
+        expected: i32,
+    ) -> Result<()> {
+        tokio::time::timeout(STATUS_TIMEOUT, async {
+            while let Some(data) = stream.next().await {
+                if self.verbose {
+                    eprintln!("BG02 notify: {}", hex(&data[..data.len().min(64)]));
+                }
+                let mut matched = false;
+                for packet in assembler.push(&data) {
+                    if let Some(ack) = notify_ack(&packet) {
+                        self.write(&ack)
+                            .await
+                            .context("acknowledge BG02 notification")?;
+                    }
+                    if let Some(status) = parse_dial_watch_ack_status(&packet) {
+                        if self.verbose {
+                            eprintln!("BG02 status {status} (waiting for {expected})");
+                        }
+                        if is_watch_theme_fatal_protocol_status(status) {
+                            let detail = watch_theme_protocol_error_message(status)
+                                .unwrap_or("upload failed");
+                            bail!("BG02 reported status {status}: {detail}");
+                        }
+                        matched |= status == expected;
+                    }
+                }
+                if matched {
+                    return Ok(());
+                }
+            }
+            bail!("BG02 notification stream ended while waiting for status {expected}");
+        })
+        .await
+        .with_context(|| format!("timed out waiting for BG02 status {expected}"))?
+    }
 }
 
 #[cfg(test)]
@@ -178,7 +226,9 @@ mod tests {
         );
         let success = [0xcd, 0, 9, 0x20, 1, 1, 0, 4, 0, 0, 0, 2];
         assert_eq!(notify_ack(&success), Some([0xdc, 0, 5, 0x20, 1, 0, 12, 1]));
-        assert_eq!(parse_cd_notify_status(&success), Some(2));
+        assert_eq!(parse_dial_watch_ack_status(&success), Some(2));
+        let chunk_ack = [0xcd, 0, 9, 0x1f, 1, 1, 0, 4, 0, 0, 3, 0xe9];
+        assert_eq!(parse_dial_watch_ack_status(&chunk_ack), Some(1001));
     }
 
     #[test]

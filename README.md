@@ -36,6 +36,10 @@ cargo run --release -- scan --seconds 15
 cargo run --release -- upload-bg02-jpeg --addr AA:BB:CC:DD:EE:FF --file photo.jpg
 ```
 
+If the transfer times out, add `--verbose` to show the received notifications
+and status codes. Use `--write-with-response` to try ATT Write Requests when
+the default Write Commands stall after the start response.
+
 ## BlueZ connect / disconnect (Linux)
 
 The **`connect`** and **`disconnect`** subcommands use the same D-Bus methods as the Ubuntu **Bluetooth** settings toggle: **`org.bluez.Device1.Connect`** and **`Disconnect`** (via [bluer](https://github.com/bluez/bluer), same path as `bluetoothctl`). Before connect, the tool sets **`Trusted=true`** when BlueZ allows it (helps **unpaired** LE peripherals — the panel shows **Paired: No** for some devices).

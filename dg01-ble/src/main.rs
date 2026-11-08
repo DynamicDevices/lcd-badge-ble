@@ -128,6 +128,12 @@ enum Command {
         /// Path to a 240x240 JPEG file
         #[arg(long)]
         file: PathBuf,
+        /// Use ATT Write Requests (with response) instead of Write Commands
+        #[arg(long)]
+        write_with_response: bool,
+        /// Print received BLE notifications and upload status codes
+        #[arg(long)]
+        verbose: bool,
     },
     /// Send "find device" (flash colours / alert on the badge)
     Find {
@@ -597,8 +603,13 @@ async fn main() -> anyhow::Result<()> {
     adapter.set_powered(true).await.context("set_powered")?;
 
     match cli.command {
-        Command::UploadBg02Jpeg { addr, file } => {
-            bg02_jpeg::upload(&adapter, &addr, &file).await?;
+        Command::UploadBg02Jpeg {
+            addr,
+            file,
+            write_with_response,
+            verbose,
+        } => {
+            bg02_jpeg::upload(&adapter, &addr, &file, write_with_response, verbose).await?;
         }
         Command::Find {
             addr,
