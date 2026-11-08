@@ -200,7 +200,9 @@ pub fn file34_start(file: &[u8]) -> Vec<u8> {
 
 /// `calculateFinishCheckcode`: 4-byte BE sum-only payload for cmd31/sub3 finish frame. Discovered via iOS sysdiagnose capture — device expects checksum only, not length+checksum..
 pub fn dial_finish_payload(file: &[u8]) -> Vec<u8> {
-    let sum: u32 = file.iter().map(|&b| u32::from(b)).sum();
+    let sum = file
+        .iter()
+        .fold(0u32, |sum, &byte| sum.wrapping_add(u32::from(byte)));
     let mut tail = Vec::with_capacity(4);
     tail.extend_from_slice(&sum.to_be_bytes());
     get_protocol(CMD_DIAL_TRANSFER, SUB_DIAL_FINISH, &tail)
@@ -443,13 +445,12 @@ mod tests {
     }
 
     #[test]
-    fn finish_payload_eight_bytes_pl() {
+    fn finish_payload_contains_only_the_four_byte_sum() {
         let file = [1u8, 2, 3, 10];
-        let p = dial_finish_payload(&file);
-        assert_eq!(p[3], 31);
-        assert_eq!(p[5], 3);
-        assert_eq!(&p[8..12], &(4u32.to_be_bytes()));
-        assert_eq!(&p[12..16], &(16u32.to_be_bytes()));
+        assert_eq!(
+            dial_finish_payload(&file),
+            [0xcd, 0, 9, 31, 1, 3, 0, 4, 0, 0, 0, 16]
+        );
     }
 
     #[test]
